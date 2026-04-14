@@ -1,0 +1,2133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Superb Cleaning — Invoice Tool</title>
+<!--
+  CHANGELOG v2 — Full Invoicing Capabilities
+  ============================================
+  NEW FEATURES (v2):
+  F1. Advanced mode toggle on Silverstone & Pleasant View:
+      - Product search field — searches existing Wave products, auto-fills price/qty
+      - Custom description field — separate override for invoice label (leave blank = use product name)
+      - Unit price override field
+      - Quantity field (default 1; supports decimals)
+      - Simple fast-path preserved when Advanced is collapsed
+  F2. Quantity field on Custom invoice line items (each row: product search + custom desc + qty + rate)
+  F3. Improved customer search: keyboard navigation (↑↓ Enter Esc), debounce 200ms
+  F4. Improved product/line item search: keyboard navigation, price shown inline
+      Product search and custom description are now separate fields across all modes
+  F5. "Sync from Wave" button in history header — pulls all Wave invoices into
+      a modal for review; one-click import any missing invoice to local history
+  F6. "Send" button on approved invoices — modal with To / Subject / Message fields
+  F7. "Edit" button on draft invoices — delete + recreate flow (Wave API limitation)
+  F8. History search/filter bar — filter by work order, client, invoice #, status
+
+  BUG FIXES (post-v2):
+  B1. sendInvoice: Wave requires `to` as [String!]! (non-nullable). Now re-fetches
+      invoice by number from Wave to get live node ID (stored ID goes stale after
+      approval) and pulls customer email as fallback when To field is left blank.
+  B2. Product search was matching on description instead of product name.
+      Frontend now sends productName (Wave product) and description (invoice label)
+      as separate fields. Backend uses productName for find/create, description
+      only as a line item label override.
+
+  PRESERVED UNCHANGED:
+  - All existing Silverstone / Pleasant View fast-path flows
+  - All queue, paste, bulk create logic
+  - All payment flows (single, bulk, CSV)
+  - All auth flows
+  - All badge/status/progress bar logic
+  - API helpers: authAPI(), waveAPI()
+  - Session storage keys: superb_user, superb_session_token
+-->
+<link href="https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,400&display=swap" rel="stylesheet">
+<style>
+/* ── RESET & ROOT ── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --blue-50: #E6F1FB; --blue-100: #B5D4F4; --blue-200: #85B7EB;
+  --blue-400: #378ADD; --blue-600: #185FA5; --blue-800: #0C447C; --blue-900: #042C53;
+  --gray-50: #F8F8F7; --gray-100: #F1EFE8; --gray-200: #D3D1C7;
+  --gray-400: #888780; --gray-600: #5F5E5A; --gray-800: #444441; --gray-900: #2C2C2A;
+  --green-50: #EAF3DE; --green-400: #639922; --green-600: #3B6D11;
+  --red-50: #FCEBEB; --red-400: #E24B4A; --red-600: #A32D2D;
+  --amber-50: #FAEEDA; --amber-400: #BA7517; --amber-600: #854F0B;
+  --purple-50: #EEEDFE; --purple-600: #534AB7;
+  --font-serif: 'Libre Baskerville', Georgia, serif;
+  --font-sans: 'DM Sans', system-ui, sans-serif;
+  --radius: 8px; --radius-lg: 12px; --radius-xl: 16px;
+  --shadow-sm: 0 1px 2px rgba(44,44,42,.05), 0 1px 4px rgba(44,44,42,.04);
+  --shadow:    0 2px 6px rgba(44,44,42,.07), 0 1px 3px rgba(44,44,42,.05);
+  --shadow-md: 0 4px 16px rgba(44,44,42,.09), 0 2px 6px rgba(44,44,42,.05);
+  --border-color: #E4E2D8;
+  --border: 1px solid var(--border-color);
+  --border-focus: 1px solid var(--blue-400);
+}
+body { font-family: var(--font-sans); background: var(--gray-100); color: var(--gray-900); min-height: 100vh; font-size: 14px; line-height: 1.6; }
+
+/* ── AUTH ── */
+.auth-wrap { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:2rem 1rem; background:linear-gradient(150deg,#eef4fb 0%,var(--gray-100) 55%); }
+.auth-card { background:#fff; border:var(--border); border-radius:var(--radius-xl); box-shadow:var(--shadow-md); width:100%; max-width:400px; overflow:hidden; }
+.auth-top { padding:1.75rem 2rem 1.25rem; border-bottom:var(--border); background:var(--gray-50); }
+.auth-logo { font-family:var(--font-serif); font-size:1.2rem; color:var(--gray-900); letter-spacing:-0.01em; }
+.auth-logo em { color:var(--blue-600); font-style:normal; }
+.auth-tagline { font-size:12px; color:var(--gray-600); margin-top:3px; }
+.auth-body { padding:1.5rem 2rem 2rem; }
+.auth-seg { display:flex; background:var(--gray-100); border-radius:var(--radius); padding:3px; margin-bottom:1.25rem; gap:3px; }
+.auth-seg-btn { flex:1; padding:7px 0; text-align:center; font-size:13px; font-weight:500; border-radius:calc(var(--radius) - 2px); cursor:pointer; color:var(--gray-600); border:none; background:transparent; transition:all 0.15s; font-family:var(--font-sans); }
+.auth-seg-btn.active { background:#fff; color:var(--gray-900); box-shadow:var(--shadow-sm); }
+.auth-error { background:var(--red-50); border:1px solid #F7C1C1; color:var(--red-600); border-radius:var(--radius); padding:9px 12px; font-size:13px; margin-bottom:12px; display:none; }
+.auth-error.visible { display:block; }
+
+/* ── APP SHELL ── */
+#auth-screen { display:flex; }
+#app-screen { display:none; min-height:100vh; flex-direction:column; }
+#app-screen.visible { display:flex; }
+.topbar { background:#fff; border-bottom:var(--border); height:56px; padding:0 1.5rem; display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:200; box-shadow:var(--shadow-sm); }
+.topbar-logo { font-family:var(--font-serif); font-size:1.05rem; color:var(--gray-900); letter-spacing:-0.01em; }
+.topbar-logo em { color:var(--blue-600); font-style:normal; }
+.topbar-right { display:flex; align-items:center; gap:10px; }
+.avatar { width:30px; height:30px; border-radius:50%; background:var(--blue-50); border:1px solid var(--blue-100); display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:500; color:var(--blue-800); }
+.nav-bar { background:#fff; border-bottom:var(--border); padding:0 1.5rem; display:flex; overflow-x:auto; }
+.nav-tab { padding:13px 18px; font-size:13px; font-weight:500; color:var(--gray-600); cursor:pointer; border-bottom:2px solid transparent; transition:all 0.15s; white-space:nowrap; user-select:none; }
+.nav-tab.active { color:var(--blue-600); border-bottom-color:var(--blue-600); }
+.nav-tab:hover:not(.active) { color:var(--gray-900); }
+.app-body { flex:1; padding:1.5rem; max-width:1100px; width:100%; margin:0 auto; }
+
+/* ── CARDS ── */
+.card { background:#fff; border:var(--border); border-radius:var(--radius-lg); box-shadow:var(--shadow-sm); }
+.card-header { padding:1.1rem 1.4rem; border-bottom:var(--border); background:var(--gray-50); display:flex; align-items:center; justify-content:space-between; }
+.card-title { font-family:var(--font-serif); font-size:0.95rem; font-weight:700; color:var(--gray-900); }
+.card-sub { font-size:11px; color:var(--gray-600); margin-top:2px; }
+.card-body { padding:1.25rem 1.4rem; }
+
+/* ── LAYOUT ── */
+.two-col { display:grid; grid-template-columns:1fr 1fr; gap:1rem; align-items:start; }
+@media (max-width:700px) { .two-col { grid-template-columns:1fr; } }
+
+/* ── FORM ── */
+.field { margin-bottom:13px; }
+.field-row { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:13px; }
+@media (max-width:480px) { .field-row { grid-template-columns:1fr; } }
+label { display:block; font-size:11px; font-weight:500; color:var(--gray-600); text-transform:uppercase; letter-spacing:0.04em; margin-bottom:5px; }
+input[type=text], input[type=date], input[type=password], input[type=number], select, textarea {
+  width:100%; padding:9px 12px; font-family:var(--font-sans); font-size:14px; color:var(--gray-900); background:#fff; border:var(--border); border-radius:var(--radius); box-shadow:var(--shadow-sm); outline:none; transition:border-color 0.15s, box-shadow 0.15s;
+}
+/* iOS zoom prevention */
+@media (max-width:768px) { input[type=text], input[type=date], input[type=password], input[type=number], select, textarea { font-size:16px; } }
+input:focus, select:focus, textarea:focus { border:var(--border-focus); box-shadow:0 0 0 3px rgba(55,138,221,0.13); }
+input::placeholder, textarea::placeholder { color:var(--gray-400); }
+textarea { resize:vertical; min-height:80px; }
+
+/* ── BUTTONS ── */
+.btn { display:inline-flex; align-items:center; justify-content:center; gap:6px; padding:9px 16px; font-family:var(--font-sans); font-size:13px; font-weight:500; border-radius:var(--radius); cursor:pointer; border:none; outline:none; transition:all 0.15s; white-space:nowrap; line-height:1; }
+.btn:active { transform:scale(0.98); }
+.btn:disabled { opacity:0.55; cursor:not-allowed; }
+.btn-primary { background:var(--blue-600); color:#fff; box-shadow:var(--shadow-sm); }
+.btn-primary:not(:disabled):hover { background:var(--blue-800); }
+.btn-secondary { background:#fff; color:var(--gray-800); border:var(--border); box-shadow:var(--shadow-sm); }
+.btn-secondary:hover { background:var(--gray-50); }
+.btn-ghost { background:transparent; color:var(--gray-600); border:1px solid transparent; padding:7px 10px; }
+.btn-ghost:hover { background:var(--gray-100); color:var(--gray-900); }
+.btn-success { background:#fff; color:var(--green-600); border:1px solid #C3DFA2; box-shadow:var(--shadow-sm); }
+.btn-success:hover { background:var(--green-50); }
+.btn-danger { background:#fff; color:var(--red-600); border:1px solid #F7C1C1; box-shadow:var(--shadow-sm); }
+.btn-danger:hover { background:var(--red-50); }
+.btn-green-solid { background:var(--green-600); color:#fff; box-shadow:var(--shadow-sm); }
+.btn-green-solid:not(:disabled):hover { background:var(--green-400); }
+.btn-amber { background:#fff; color:var(--amber-600); border:1px solid #FAC775; box-shadow:var(--shadow-sm); }
+.btn-amber:hover { background:var(--amber-50); }
+.btn-sm { padding:5px 11px; font-size:12px; }
+.btn-full { width:100%; }
+.btn-icon-only { padding:7px 9px; background:transparent; border:1px solid transparent; color:var(--gray-500); cursor:pointer; border-radius:var(--radius); font-size:14px; }
+.btn-icon-only:hover { background:var(--gray-100); color:var(--red-600); }
+.signout-btn { font-size:12px; color:var(--gray-600); background:none; border:none; cursor:pointer; padding:5px 10px; border-radius:var(--radius); font-family:var(--font-sans); transition:all 0.15s; }
+.signout-btn:hover { color:var(--red-600); background:var(--red-50); }
+
+/* ── PROPERTY SWITCHER ── */
+.prop-switcher { display:flex; gap:6px; margin-bottom:1.1rem; }
+.prop-btn { flex:1; padding:9px 10px; border:var(--border); border-radius:var(--radius); background:#fff; cursor:pointer; text-align:left; box-shadow:var(--shadow-sm); transition:all 0.15s; font-family:var(--font-sans); }
+.prop-btn:hover { border-color:var(--blue-200); }
+.prop-btn.active { border-color:var(--blue-400); background:var(--blue-50); }
+.prop-btn-name { font-size:12px; font-weight:500; color:var(--gray-900); }
+.prop-btn.active .prop-btn-name { color:var(--blue-800); }
+.prop-btn-detail { font-size:11px; color:var(--gray-600); margin-top:2px; }
+.prop-btn.active .prop-btn-detail { color:var(--blue-600); }
+
+/* ── RATE SELECTOR ── */
+.rate-row { display:flex; gap:6px; margin-bottom:12px; }
+.rate-btn { flex:1; padding:8px; border:var(--border); border-radius:var(--radius); background:#fff; cursor:pointer; text-align:center; font-size:13px; font-weight:500; color:var(--gray-700); transition:all 0.15s; box-shadow:var(--shadow-sm); font-family:var(--font-sans); }
+.rate-btn.active { border-color:var(--blue-400); background:var(--blue-50); color:var(--blue-800); }
+
+/* ── INFO PILL ROWS ── */
+.info-row { display:flex; align-items:center; justify-content:space-between; padding:8px 11px; background:var(--gray-50); border:var(--border); border-radius:var(--radius); font-size:13px; color:var(--gray-700); margin-bottom:7px; }
+.info-badge { font-size:10px; font-weight:500; padding:2px 8px; border-radius:20px; white-space:nowrap; }
+.info-badge-auto { background:var(--green-50); color:var(--green-600); border:1px solid #C3DFA2; }
+.info-badge-tax  { background:var(--purple-50); color:var(--purple-600); border:1px solid #CECBF6; }
+
+/* ── ADVANCED TOGGLE ── */
+.advanced-toggle { display:flex; align-items:center; gap:8px; cursor:pointer; margin:8px 0 0; user-select:none; }
+.advanced-toggle-icon { font-size:11px; color:var(--blue-600); transition:transform 0.2s; }
+.advanced-toggle-icon.open { transform:rotate(90deg); }
+.advanced-toggle-label { font-size:12px; color:var(--blue-600); font-weight:500; }
+.advanced-panel { margin-top:10px; padding:12px; background:var(--blue-50); border:1px solid var(--blue-100); border-radius:var(--radius); }
+.advanced-panel .field { margin-bottom:10px; }
+.advanced-panel .field:last-child { margin-bottom:0; }
+.advanced-panel label { color:var(--blue-800); }
+
+/* ── INPUT TABS ── */
+.input-tabs { display:flex; gap:2px; margin-bottom:11px; }
+.input-tab { padding:6px 13px; font-size:12px; font-weight:500; border-radius:var(--radius); cursor:pointer; color:var(--gray-600); background:transparent; border:none; transition:all 0.15s; font-family:var(--font-sans); }
+.input-tab.active { background:var(--blue-50); color:var(--blue-800); }
+.input-tab:hover:not(.active) { background:var(--gray-100); }
+
+/* ── QUEUE ── */
+.queue-wrap { margin-top:10px; }
+.queue-label { font-size:11px; font-weight:500; text-transform:uppercase; letter-spacing:0.05em; color:var(--gray-600); margin-bottom:8px; display:flex; align-items:center; gap:6px; }
+.queue-count { background:var(--blue-50); color:var(--blue-800); border-radius:20px; padding:1px 7px; font-size:10px; }
+.queue-actions { margin-top:8px; display:flex; justify-content:flex-end; }
+.queue-list { list-style:none; display:flex; flex-direction:column; gap:5px; margin-bottom:10px; }
+.queue-item { display:flex; align-items:center; gap:8px; padding:8px 11px; background:var(--gray-50); border:var(--border); border-radius:var(--radius); font-size:13px; }
+.queue-item .wo { flex:1; font-weight:500; color:var(--gray-900); }
+.empty-state { text-align:center; padding:1.5rem; color:var(--gray-400); font-size:13px; font-style:italic; }
+
+/* ── BADGES ── */
+.badge { display:inline-flex; align-items:center; padding:2px 8px; border-radius:20px; font-size:11px; font-weight:500; white-space:nowrap; }
+.badge-pending  { background:var(--amber-50);  color:var(--amber-600);  border:1px solid #FAC775; }
+.badge-creating { background:var(--blue-50);   color:var(--blue-600);   border:1px solid var(--blue-100); }
+.badge-done     { background:var(--green-50);  color:var(--green-600);  border:1px solid #C3DFA2; }
+.badge-error    { background:var(--red-50);    color:var(--red-600);    border:1px solid #F7C1C1; }
+.badge-draft    { background:var(--amber-50);  color:var(--amber-600);  border:1px solid #FAC775; }
+.badge-approved { background:var(--blue-50);   color:var(--blue-800);   border:1px solid var(--blue-100); }
+.badge-paid     { background:var(--green-50);  color:var(--green-600);  border:1px solid #C3DFA2; }
+.badge-voided   { background:var(--gray-100);  color:var(--gray-600);   border:1px solid var(--gray-200); }
+
+/* ── STATUS BOX ── */
+.status-box { margin-top:11px; padding:10px 13px; border-radius:var(--radius); font-size:13px; font-weight:500; display:none; align-items:flex-start; gap:9px; }
+.status-box.loading { display:flex; background:var(--blue-50);  border:1px solid var(--blue-100);  color:var(--blue-800); }
+.status-box.success { display:flex; background:var(--green-50); border:1px solid #C3DFA2;           color:var(--green-600); }
+.status-box.error   { display:flex; background:var(--red-50);   border:1px solid #F7C1C1;           color:var(--red-600); }
+.status-icon { font-size:14px; flex-shrink:0; margin-top:1px; }
+.spinner { width:14px; height:14px; border:2px solid currentColor; border-top-color:transparent; border-radius:50%; animation:spin 0.7s linear infinite; flex-shrink:0; opacity:0.7; }
+@keyframes spin { to { transform:rotate(360deg); } }
+
+/* ── PROGRESS BAR ── */
+.progress-wrap { width:100%; height:4px; background:var(--gray-200); border-radius:4px; margin-top:11px; display:none; overflow:hidden; }
+.progress-fill { height:100%; background:var(--blue-400); border-radius:4px; transition:width 0.3s ease; }
+
+/* ── HISTORY ── */
+.history-table { width:100%; border-collapse:collapse; font-size:13px; }
+.history-table th { text-align:left; font-size:11px; font-weight:500; color:var(--gray-600); text-transform:uppercase; letter-spacing:0.04em; padding:9px 12px; border-bottom:var(--border); background:var(--gray-50); white-space:nowrap; }
+.history-table td { padding:10px 12px; border-bottom:1px solid var(--gray-100); vertical-align:middle; }
+.history-table tr:last-child td { border-bottom:none; }
+.history-table tr:hover td { background:var(--gray-50); }
+.history-table tr.voided td { opacity:0.5; }
+.history-table tr.voided .hist-wo { text-decoration:line-through; }
+.hist-wo { font-weight:500; color:var(--gray-900); font-size:13px; }
+.hist-num { font-size:11px; color:var(--blue-600); margin-top:1px; font-weight:500; }
+.hist-meta { font-size:11px; color:var(--gray-600); margin-top:1px; }
+.hist-amount { font-weight:600; color:var(--gray-900); }
+.hist-actions { display:flex; gap:4px; flex-wrap:wrap; }
+.invoice-link { color:var(--blue-600); text-decoration:none; font-weight:500; }
+.invoice-link:hover { text-decoration:underline; }
+.history-filter { padding:10px 1.4rem; border-bottom:var(--border); background:var(--gray-50); }
+.history-filter input { font-size:13px; padding:7px 11px; }
+
+/* ── LINE ITEMS ── */
+.line-item-card { background:var(--gray-50); border:var(--border); border-radius:var(--radius); padding:10px; margin-bottom:8px; }
+.line-item-card-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; gap:8px; }
+.line-item-product-search { flex:1; }
+.line-item-row { display:grid; grid-template-columns:1fr 70px 80px; gap:7px; align-items:center; }
+.line-item-sub-label { font-size:10px; font-weight:500; color:var(--gray-500); text-transform:uppercase; letter-spacing:.04em; margin-bottom:3px; }
+
+/* ── TAX TOGGLE ── */
+.toggle-row { display:flex; align-items:center; gap:10px; margin-bottom:11px; }
+.toggle-checkbox { width:16px; height:16px; cursor:pointer; accent-color:var(--blue-600); }
+.toggle-label-text { font-size:13px; color:var(--gray-800); cursor:pointer; text-transform:none; letter-spacing:0; margin:0; }
+
+/* ── DIVIDER ── */
+.divider { height:1px; background:var(--border-color); margin:1rem 0; }
+
+/* ── FLOATING DROPDOWN ── */
+#floating-dropdown { display:none; position:fixed; background:#fff; border:var(--border); border-radius:var(--radius); z-index:9999; list-style:none; max-height:220px; overflow-y:auto; box-shadow:var(--shadow-md); min-width:200px; }
+.dd-item { padding:10px 14px; font-size:13px; cursor:pointer; border-bottom:var(--border); display:flex; justify-content:space-between; align-items:center; }
+.dd-item:last-child { border-bottom:none; }
+.dd-item:hover, .dd-item.highlighted { background:var(--blue-50); }
+.dd-item .dd-price { font-size:11px; color:var(--gray-600); }
+.dd-hint { padding:10px 14px; font-size:12px; color:var(--gray-600); font-style:italic; }
+
+/* ── MODAL ── */
+.modal-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.35); z-index:1000; align-items:center; justify-content:center; padding:1rem; }
+.modal-backdrop.open { display:flex; }
+.modal { background:#fff; border-radius:var(--radius-xl); box-shadow:var(--shadow-md); width:100%; max-width:520px; max-height:90vh; overflow-y:auto; }
+.modal-header { padding:1.25rem 1.5rem; border-bottom:var(--border); display:flex; align-items:center; justify-content:space-between; background:var(--gray-50); border-radius:var(--radius-xl) var(--radius-xl) 0 0; }
+.modal-title { font-family:var(--font-serif); font-size:1rem; font-weight:700; }
+.modal-close { background:none; border:none; font-size:18px; cursor:pointer; color:var(--gray-600); padding:4px 8px; border-radius:var(--radius); }
+.modal-close:hover { background:var(--gray-100); color:var(--gray-900); }
+.modal-body { padding:1.5rem; }
+.modal-footer { padding:1rem 1.5rem; border-top:var(--border); display:flex; gap:8px; justify-content:flex-end; background:var(--gray-50); border-radius:0 0 var(--radius-xl) var(--radius-xl); }
+.modal-status { margin-top:10px; padding:9px 12px; border-radius:var(--radius); font-size:13px; display:none; }
+.modal-status.error { display:block; background:var(--red-50); border:1px solid #F7C1C1; color:var(--red-600); }
+.modal-status.success { display:block; background:var(--green-50); border:1px solid #C3DFA2; color:var(--green-600); }
+.modal-status.loading { display:block; background:var(--blue-50); border:1px solid var(--blue-100); color:var(--blue-800); }
+
+/* ── SYNC TABLE ── */
+.sync-table { width:100%; border-collapse:collapse; font-size:12px; }
+.sync-table th { padding:7px 10px; text-align:left; border-bottom:var(--border); background:var(--gray-50); font-size:11px; color:var(--gray-600); text-transform:uppercase; letter-spacing:.04em; }
+.sync-table td { padding:8px 10px; border-bottom:1px solid var(--gray-100); vertical-align:middle; }
+.sync-table tr:last-child td { border-bottom:none; }
+.sync-table tr.already-in { opacity:0.45; }
+@media (max-width:900px) {
+  .topbar { padding:0 1rem; }
+  .app-body { padding:1rem; }
+  .card-header { padding:1rem; }
+  .card-body { padding:1rem; }
+}
+@media (max-width:700px) {
+  .topbar-right .user-name { display:none; }
+  .history-table thead { display:none; }
+  .history-table, .history-table tbody, .history-table tr, .history-table td { display:block; width:100%; }
+  .history-table tr { border-bottom:var(--border); padding:10px; }
+  .history-table tr:last-child { border-bottom:none; }
+  .history-table td { border-bottom:none; padding:6px 0; }
+  .history-table td[data-label]::before {
+    content: attr(data-label);
+    display:block;
+    font-size:10px;
+    font-weight:600;
+    letter-spacing:.04em;
+    text-transform:uppercase;
+    color:var(--gray-600);
+    margin-bottom:3px;
+  }
+}
+</style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════ AUTH ══════════════════════════════════════════════ -->
+<div id="auth-screen" class="auth-wrap">
+  <div class="auth-card">
+    <div class="auth-top">
+      <div class="auth-logo">Superb <em>Cleaning</em> Co.</div>
+      <div class="auth-tagline">Wave Invoice Creator</div>
+    </div>
+    <div class="auth-body">
+      <div class="auth-seg">
+        <button class="auth-seg-btn active" id="seg-login" onclick="showLogin()">Sign in</button>
+        <button class="auth-seg-btn" id="seg-signup" onclick="showSignup()">Create account</button>
+      </div>
+      <div id="login-panel">
+        <div class="auth-error" id="login-error"></div>
+        <div class="field"><label>Username</label><input type="text" id="login-username" placeholder="your username" autocomplete="username" onkeydown="if(event.key==='Enter') login()"></div>
+        <div class="field"><label>Password</label><input type="password" id="login-password" placeholder="••••••••" autocomplete="current-password" onkeydown="if(event.key==='Enter') login()"></div>
+        <button class="btn btn-primary btn-full" onclick="login()" id="login-btn">Sign in</button>
+      </div>
+      <div id="signup-panel" style="display:none">
+        <div class="auth-error" id="signup-error"></div>
+        <div class="field"><label>Username</label><input type="text" id="signup-username" placeholder="choose a username" autocomplete="username"></div>
+        <div class="field"><label>Password</label><input type="password" id="signup-password" placeholder="at least 6 characters" autocomplete="new-password"></div>
+        <div class="field"><label>Invite Code</label><input type="text" id="signup-invite" placeholder="required to register" onkeydown="if(event.key==='Enter') signup()"></div>
+        <button class="btn btn-primary btn-full" onclick="signup()" id="signup-btn">Create account</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════ APP ══════════════════════════════════════════════ -->
+<div id="app-screen">
+
+  <header class="topbar">
+    <div class="topbar-logo">Superb <em>Cleaning</em> Co.</div>
+    <div class="topbar-right">
+      <div class="avatar" id="user-avatar">IC</div>
+      <span class="user-name" id="user-display-name"></span>
+      <button class="signout-btn" onclick="logout()">Sign out</button>
+    </div>
+  </header>
+
+  <nav class="nav-bar">
+    <div class="nav-tab active" id="main-tab-invoices" onclick="switchMainTab('invoices')">Invoices</div>
+    <div class="nav-tab" id="main-tab-payments" onclick="switchMainTab('payments')">Payments</div>
+  </nav>
+
+  <main class="app-body">
+
+    <!-- ══════ INVOICES PANEL ══════ -->
+    <div id="panel-invoices">
+      <div class="two-col">
+
+        <!-- LEFT: Create invoice -->
+        <div class="card">
+          <div class="card-header">
+            <div><div class="card-title">Create Invoice</div><div class="card-sub">Drafts — approve or delete from history</div></div>
+          </div>
+          <div class="card-body">
+
+            <!-- Property switcher -->
+            <div class="prop-switcher">
+              <button class="prop-btn active" id="prop-silverstone" onclick="switchProperty('silverstone')">
+                <div class="prop-btn-name">Silverstone</div>
+                <div class="prop-btn-detail">$150 · no tax</div>
+              </button>
+              <button class="prop-btn" id="prop-pleasant" onclick="switchProperty('pleasant')">
+                <div class="prop-btn-name">Pleasant View</div>
+                <div class="prop-btn-detail">$135/$170 + tax</div>
+              </button>
+              <button class="prop-btn" id="prop-custom" onclick="switchProperty('custom')">
+                <div class="prop-btn-name">Custom</div>
+                <div class="prop-btn-detail">Any client</div>
+              </button>
+            </div>
+
+            <!-- Silverstone section -->
+            <div id="info-silverstone">
+              <div class="info-row"><span>Bill To: Silverstone Properties</span><span class="info-badge info-badge-auto">auto</span></div>
+              <div class="info-row" style="margin-bottom:6px"><span>Apartment Turn Cleaning — $150.00</span><span class="info-badge info-badge-auto">auto</span></div>
+              <!-- F1: Advanced toggle for Silverstone -->
+              <div class="advanced-toggle" onclick="toggleAdvanced('silverstone')">
+                <span class="advanced-toggle-icon" id="adv-icon-silverstone">▶</span>
+                <span class="advanced-toggle-label">Advanced options</span>
+              </div>
+              <div id="adv-panel-silverstone" class="advanced-panel" style="display:none">
+                <div class="field">
+                  <label>Search product <span style="font-weight:400;color:var(--blue-600);text-transform:none;letter-spacing:0">— auto-fills price</span></label>
+                  <input type="text" id="silverstone-product-search" placeholder="e.g. Apartment Turn Cleaning…"
+                    oninput="searchAdvProduct('silverstone', this.value)"
+                    onkeydown="handleAdvProductKey(event, 'silverstone')"
+                    autocomplete="off">
+                </div>
+                <div class="field">
+                  <label>Custom description <span style="font-weight:400;color:var(--blue-600);text-transform:none;letter-spacing:0">— leave blank to use product name</span></label>
+                  <input type="text" id="silverstone-desc" placeholder="e.g. Deep Clean — Unit 4B">
+                </div>
+                <div class="field-row" style="margin-bottom:0">
+                  <div>
+                    <label>Quantity <span style="font-weight:400;color:var(--blue-600);text-transform:none;letter-spacing:0">(default 1)</span></label>
+                    <input type="number" id="silverstone-qty" placeholder="1" min="0.1" step="0.5" value="1">
+                  </div>
+                  <div>
+                    <label>Unit price <span style="font-weight:400;color:var(--blue-600);text-transform:none;letter-spacing:0">— auto-filled from product</span></label>
+                    <input type="number" id="silverstone-price" placeholder="150.00" min="0" step="0.01">
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Pleasant View section -->
+            <div id="info-pleasant" style="display:none">
+              <div class="info-row"><span>Bill To: Pleasant View Gardens</span><span class="info-badge info-badge-auto">auto</span></div>
+              <div class="info-row">
+                <span>Apartment Turn Cleaning + 6.625% Tax</span>
+                <span class="info-badge info-badge-tax">tax applied</span>
+              </div>
+              <div class="field" style="margin-top:10px">
+                <label>Select Rate</label>
+                <div class="rate-row">
+                  <button class="rate-btn active" id="rate-135" onclick="selectRate(135)">$135.00</button>
+                  <button class="rate-btn" id="rate-170" onclick="selectRate(170)">$170.00</button>
+                </div>
+              </div>
+              <!-- F1: Advanced toggle for Pleasant View -->
+              <div class="advanced-toggle" onclick="toggleAdvanced('pleasant')">
+                <span class="advanced-toggle-icon" id="adv-icon-pleasant">▶</span>
+                <span class="advanced-toggle-label">Advanced options</span>
+              </div>
+              <div id="adv-panel-pleasant" class="advanced-panel" style="display:none">
+                <div class="field">
+                  <label>Search product <span style="font-weight:400;color:var(--blue-600);text-transform:none;letter-spacing:0">— auto-fills price</span></label>
+                  <input type="text" id="pleasant-product-search" placeholder="e.g. Apartment Turn Cleaning…"
+                    oninput="searchAdvProduct('pleasant', this.value)"
+                    onkeydown="handleAdvProductKey(event, 'pleasant')"
+                    autocomplete="off">
+                </div>
+                <div class="field">
+                  <label>Custom description <span style="font-weight:400;color:var(--blue-600);text-transform:none;letter-spacing:0">— leave blank to use product name</span></label>
+                  <input type="text" id="pleasant-desc" placeholder="e.g. Move-Out Clean — Bldg C">
+                </div>
+                <div class="field-row" style="margin-bottom:0">
+                  <div>
+                    <label>Quantity <span style="font-weight:400;color:var(--blue-600);text-transform:none;letter-spacing:0">(default 1)</span></label>
+                    <input type="number" id="pleasant-qty" placeholder="1" min="0.1" step="0.5" value="1">
+                  </div>
+                  <div>
+                    <label>Unit price <span style="font-weight:400;color:var(--blue-600);text-transform:none;letter-spacing:0">— auto-filled from product</span></label>
+                    <input type="number" id="pleasant-price" placeholder="" min="0" step="0.01">
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Custom invoice fields -->
+            <div id="info-custom" style="display:none">
+              <!-- F3: improved customer search with keyboard nav -->
+              <div class="field">
+                <label>Customer Name</label>
+                <div style="position:relative">
+                  <input type="text" id="custom-customer" placeholder="Search or enter customer name"
+                    oninput="searchCustomers(this.value, 'custom-customer')"
+                    onkeydown="handleDropdownKey(event, 'custom-customer')"
+                    autocomplete="off">
+                </div>
+              </div>
+              <div class="field">
+                <label>PO / Reference <span style="font-weight:400;color:var(--gray-400);text-transform:none;letter-spacing:0">(optional)</span></label>
+                <input type="text" id="custom-po-input" placeholder="Work order, address, job # etc.">
+              </div>
+              <!-- Line items: product search + custom description + qty + rate -->
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+                <label style="margin:0">Line Items</label>
+                <button class="btn btn-ghost btn-sm" onclick="addLineItem()">+ Add item</button>
+              </div>
+              <div id="line-items-list"></div>
+              <div class="toggle-row">
+                <input type="checkbox" class="toggle-checkbox" id="custom-tax-toggle">
+                <label class="toggle-label-text" for="custom-tax-toggle">Apply 6.625% NJ sales tax to entire invoice</label>
+              </div>
+            </div>
+
+            <div class="divider"></div>
+
+            <div class="field-row">
+              <div><label>Invoice Date</label><input type="date" id="invoiceDate"></div>
+              <div id="due-date-wrap" style="display:none"><label>Due Date</label><input type="date" id="dueDateOverride"></div>
+            </div>
+
+            <!-- Input tabs (hidden for custom) -->
+            <div id="input-tabs" class="input-tabs">
+              <button class="input-tab active" onclick="switchTab('single')">Add one</button>
+              <button class="input-tab" onclick="switchTab('paste')">Paste from Sheets</button>
+            </div>
+
+            <!-- Single WO entry -->
+            <div id="tab-single" class="tab-panel" style="display:block">
+              <div class="field" style="margin-bottom:9px">
+                <input type="text" id="workOrderInput" placeholder="Work order number (e.g. 3471)"
+                  onkeydown="if(event.key==='Enter') createSingle()">
+              </div>
+              <div style="display:flex;gap:8px">
+                <button class="btn btn-primary" style="flex:1" onclick="createSingle()">⚡ Create now</button>
+                <button class="btn btn-secondary" onclick="addToQueue()">+ Queue</button>
+              </div>
+            </div>
+
+            <!-- Paste entry -->
+            <div id="tab-paste" class="tab-panel" style="display:none">
+              <div class="field">
+                <label id="pasteLabel">Paste work orders — one per line</label>
+                <textarea id="pasteInput" placeholder="3471&#10;3472&#10;3473&#10;..."></textarea>
+              </div>
+              <button class="btn btn-secondary" style="width:100%" onclick="addFromPaste()">Add all to queue</button>
+            </div>
+
+            <!-- Queue -->
+            <div id="queue-wrap" class="queue-wrap">
+              <div class="queue-label">Queue <span class="queue-count" id="queueCount" style="display:none"></span></div>
+              <ul class="queue-list" id="queueList"><li class="empty-state">No items added yet</li></ul>
+              <div class="queue-actions">
+                <button class="btn btn-ghost btn-sm" id="clearQueueBtn" onclick="clearQueue()" style="display:none">Clear queue</button>
+              </div>
+              <button class="btn btn-primary btn-full" id="createBtn" onclick="createAll()" style="display:none">
+                <span id="btnText">Create all invoices</span>
+              </button>
+            </div>
+
+            <!-- Custom create button -->
+            <button class="btn btn-primary btn-full" id="customCreateBtn" style="display:none" onclick="createCustomInvoice()">Create invoice</button>
+
+            <div class="progress-wrap" id="progressWrap"><div class="progress-fill" id="progressBar" style="width:0%"></div></div>
+            <div class="status-box" id="statusBox"><div class="status-icon" id="statusIcon"></div><div id="statusMsg"></div></div>
+
+          </div>
+        </div>
+
+        <!-- RIGHT: History -->
+        <div class="card" style="overflow:hidden">
+          <div class="card-header">
+            <div><div class="card-title">Recent Invoices</div><div class="card-sub" id="hist-sub">Shared · all users · last 100</div></div>
+            <div style="display:flex;gap:6px">
+              <button class="btn btn-ghost btn-sm" onclick="openSyncModal()" title="Sync from Wave">⇄ Sync</button>
+              <button class="btn btn-ghost btn-sm" onclick="loadHistory()">↻</button>
+            </div>
+          </div>
+          <!-- F8: History filter bar -->
+          <div class="history-filter">
+            <input type="text" id="historyFilter" placeholder="Filter by work order, client, invoice #…" oninput="renderHistory()">
+          </div>
+          <div style="overflow-x:auto">
+            <table class="history-table">
+              <thead>
+                <tr>
+                  <th>Work Order</th><th>Client</th><th>Amount</th><th>Status</th><th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="historyList"><tr><td colspan="5" class="empty-state">No invoices yet</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+    </div><!-- end panel-invoices -->
+
+    <!-- ══════ PAYMENTS PANEL ══════ -->
+    <div id="panel-payments" style="display:none">
+      <div class="two-col">
+        <div class="card">
+          <div class="card-header"><div class="card-title">Mark Invoices as Paid</div></div>
+          <div class="card-body">
+            <div class="field-row">
+              <div class="field" style="margin-bottom:0"><label>Payment Date</label><input type="date" id="paymentDate"></div>
+              <div class="field" style="margin-bottom:0">
+                <label>Payment Method</label>
+                <select id="paymentMethod">
+                  <option value="UNSPECIFIED">Unspecified</option>
+                  <option value="BANK_TRANSFER">Bank Transfer</option>
+                  <option value="CHEQUE">Cheque</option>
+                  <option value="CASH">Cash</option>
+                  <option value="CREDIT_CARD">Credit Card</option>
+                  <option value="PAYPAL">PayPal</option>
+                  <option value="OTHER">Other</option>
+                </select>
+              </div>
+            </div>
+            <div class="field" style="margin-top:11px"><label>Deposit Account</label><select id="paymentAccountId"><option value="">Loading accounts...</option></select></div>
+            <div class="divider"></div>
+            <div class="field">
+              <label>Single Invoice</label>
+              <div style="display:flex;gap:8px">
+                <input type="text" id="singlePaidInput" placeholder="Invoice # (e.g. 0042)" style="flex:1" onkeydown="if(event.key==='Enter') markSinglePaid()">
+                <button class="btn btn-green-solid" onclick="markSinglePaid()">✓ Mark Paid</button>
+              </div>
+            </div>
+            <div class="divider"></div>
+            <div style="font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:.05em;color:var(--gray-600);margin-bottom:10px">Bulk</div>
+            <div class="input-tabs" style="margin-bottom:10px">
+              <button class="input-tab active" id="paid-tab-btn-paste" onclick="switchPaidTab('paste')">Paste numbers</button>
+              <button class="input-tab" id="paid-tab-btn-csv" onclick="switchPaidTab('csv')">Upload CSV</button>
+            </div>
+            <div id="paid-tab-paste"><div class="field"><label>Invoice numbers — one per line</label><textarea id="paidPasteInput" placeholder="#0042&#10;#0043&#10;#0044&#10;..." style="min-height:70px"></textarea></div></div>
+            <div id="paid-tab-csv" style="display:none"><div class="field"><label>CSV — invoice # in first column</label><input type="file" id="paidCsvInput" accept=".csv" style="padding:6px 0"></div></div>
+            <div style="display:flex;gap:8px;margin-bottom:10px">
+              <button class="btn btn-secondary" style="flex:1" onclick="addPaidItems()">+ Add to queue</button>
+              <button class="btn btn-green-solid" id="markPaidBtn" style="flex:1" onclick="markAllPaid()">✓ Mark all paid</button>
+            </div>
+            <div class="status-box" id="paidStatusBox"><div class="status-icon" id="paidStatusIcon"></div><div id="paidStatusMsg"></div></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><div class="card-title">Payment Queue</div></div>
+          <div class="card-body"><ul class="queue-list" id="paidQueueList"><li class="empty-state">No invoices added yet</li></ul></div>
+        </div>
+      </div>
+    </div><!-- end panel-payments -->
+
+  </main>
+</div>
+
+<!-- ══════ FLOATING DROPDOWN ══════ -->
+<div id="floating-dropdown"></div>
+
+<!-- ══════ SEND INVOICE MODAL (F6) ══════ -->
+<div class="modal-backdrop" id="modal-send">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">Send Invoice</div>
+      <button class="modal-close" onclick="closeModal('modal-send')">×</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="send-invoice-id">
+      <input type="hidden" id="send-invoice-num">
+      <div class="field">
+        <label>To (email address) <span style="font-weight:400;color:var(--gray-400);text-transform:none;letter-spacing:0">— leave blank to use Wave default</span></label>
+        <input type="text" id="send-to" placeholder="client@example.com">
+      </div>
+      <div class="field">
+        <label>Subject <span style="font-weight:400;color:var(--gray-400);text-transform:none;letter-spacing:0">— optional</span></label>
+        <input type="text" id="send-subject" placeholder="Invoice from Superb Cleaning Co.">
+      </div>
+      <div class="field">
+        <label>Message <span style="font-weight:400;color:var(--gray-400);text-transform:none;letter-spacing:0">— optional</span></label>
+        <textarea id="send-message" placeholder="Please find your invoice attached." style="min-height:70px"></textarea>
+      </div>
+      <div class="modal-status" id="send-status"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal('modal-send')">Cancel</button>
+      <button class="btn btn-primary" id="send-submit-btn" onclick="submitSendInvoice()">Send Invoice</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════ EDIT DRAFT MODAL (F7) ══════ -->
+<div class="modal-backdrop" id="modal-edit">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">Edit Draft Invoice</div>
+      <button class="modal-close" onclick="closeModal('modal-edit')">×</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="edit-invoice-id">
+      <input type="hidden" id="edit-invoice-num">
+      <input type="hidden" id="edit-customer-name">
+      <input type="hidden" id="edit-tax-percent">
+      <p style="font-size:13px;color:var(--gray-700);margin-bottom:1rem;padding:9px 12px;background:var(--amber-50);border:1px solid #FAC775;border-radius:var(--radius)">
+        ⚠ Wave doesn't support editing approved invoices. This will <strong>delete</strong> the draft and create a new one with your changes.
+      </p>
+      <div class="field-row">
+        <div><label>Invoice Date</label><input type="date" id="edit-invoice-date"></div>
+        <div><label>PO / Work Order</label><input type="text" id="edit-po"></div>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <label style="margin:0">Line Items</label>
+        <button class="btn btn-ghost btn-sm" onclick="addEditLineItem()">+ Add item</button>
+      </div>
+      <div class="line-item-header">
+        <span>Description</span><span>Qty</span><span>Rate</span><span></span>
+      </div>
+      <div id="edit-line-items-list"></div>
+      <div class="modal-status" id="edit-status"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal('modal-edit')">Cancel</button>
+      <button class="btn btn-amber" id="edit-submit-btn" onclick="submitEditInvoice()">Delete & Recreate</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════ SYNC FROM WAVE MODAL (F5) ══════ -->
+<div class="modal-backdrop" id="modal-sync">
+  <div class="modal" style="max-width:700px">
+    <div class="modal-header">
+      <div class="modal-title">Sync Invoices from Wave</div>
+      <button class="modal-close" onclick="closeModal('modal-sync')">×</button>
+    </div>
+    <div class="modal-body">
+      <p style="font-size:13px;color:var(--gray-700);margin-bottom:1rem">Invoices already in your history are shown greyed out. Click <strong>Import</strong> to add any missing invoice.</p>
+      <div id="sync-status" class="modal-status"></div>
+      <div style="overflow-x:auto;max-height:400px;overflow-y:auto">
+        <table class="sync-table" id="sync-table">
+          <thead><tr><th>#</th><th>Client</th><th>Date</th><th>Amount</th><th>Status</th><th></th></tr></thead>
+          <tbody id="sync-table-body"><tr><td colspan="6" class="empty-state">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal('modal-sync')">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ════════════════════════════════════════════════════════════
+//  STATE
+// ════════════════════════════════════════════════════════════
+let currentUser     = null;
+let sessionToken    = null;
+let invoiceHistory  = [];
+let queue           = [];
+let paidQueue       = [];
+let currentProperty = 'silverstone';
+let selectedRate    = 135;
+let lineItems       = [{ id: Date.now(), description: '', qty: 1, rate: '' }];
+let editLineItems   = [];
+let cachedBusinessId = null;
+const DELETE_UNDO_MS = 8000;
+const CLEAR_QUEUE_UNDO_MS = 8000;
+let pendingDeletes = {};
+let queueUndoData = null;
+// Dropdown state for keyboard nav
+let ddItems         = [];
+let ddHighlight     = -1;
+let ddTarget        = null; // input element id
+
+// ════════════════════════════════════════════════════════════
+//  SESSION
+// ════════════════════════════════════════════════════════════
+function checkSession() {
+  const savedUser  = localStorage.getItem('superb_user');
+  const savedToken = localStorage.getItem('superb_session_token');
+  if (savedUser && savedToken) {
+    try {
+      currentUser  = JSON.parse(savedUser);
+      sessionToken = savedToken;
+      showApp();
+    } catch (e) {
+      localStorage.removeItem('superb_user');
+      localStorage.removeItem('superb_session_token');
+    }
+  }
+}
+
+function showApp() {
+  document.getElementById('auth-screen').style.display = 'none';
+  document.getElementById('app-screen').classList.add('visible');
+  document.getElementById('user-display-name').textContent = currentUser.displayName;
+  document.getElementById('user-avatar').textContent = currentUser.displayName.slice(0,2).toUpperCase();
+  const today = new Date().toISOString().split('T')[0];
+  document.getElementById('invoiceDate').value = today;
+  document.getElementById('paymentDate').value = today;
+  loadHistory();
+}
+
+function showLogin() {
+  document.getElementById('login-panel').style.display  = 'block';
+  document.getElementById('signup-panel').style.display = 'none';
+  document.getElementById('seg-login').classList.add('active');
+  document.getElementById('seg-signup').classList.remove('active');
+  document.getElementById('login-error').classList.remove('visible');
+}
+
+function showSignup() {
+  document.getElementById('login-panel').style.display  = 'none';
+  document.getElementById('signup-panel').style.display = 'block';
+  document.getElementById('seg-signup').classList.add('active');
+  document.getElementById('seg-login').classList.remove('active');
+  document.getElementById('signup-error').classList.remove('visible');
+}
+
+async function logout() {
+  Object.values(pendingDeletes).forEach(p => clearTimeout(p.timeoutId));
+  pendingDeletes = {};
+  if (queueUndoData?.timeoutId) clearTimeout(queueUndoData.timeoutId);
+  queueUndoData = null;
+  try { await authAPI('logout', {}); } catch(e) {}
+  localStorage.removeItem('superb_user');
+  localStorage.removeItem('superb_session_token');
+  currentUser = null; sessionToken = null;
+  document.getElementById('app-screen').classList.remove('visible');
+  document.getElementById('auth-screen').style.display = 'flex';
+  showLogin();
+}
+
+// ════════════════════════════════════════════════════════════
+//  AUTH FLOWS
+// ════════════════════════════════════════════════════════════
+async function login() {
+  const username = document.getElementById('login-username').value.trim();
+  const password = document.getElementById('login-password').value;
+  const errEl    = document.getElementById('login-error');
+  const btn      = document.getElementById('login-btn');
+  errEl.classList.remove('visible');
+  if (!username || !password) { errEl.textContent = 'Please enter username and password.'; errEl.classList.add('visible'); return; }
+  btn.disabled = true; btn.textContent = 'Signing in...';
+  try {
+    const res  = await fetch('/api/auth', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ action:'login', username, password }) });
+    const data = await res.json();
+    if (!data.success) { errEl.textContent = data.error || 'Login failed.'; errEl.classList.add('visible'); }
+    else { currentUser = { username: username.toLowerCase(), displayName: data.displayName }; sessionToken = data.sessionToken; localStorage.setItem('superb_user', JSON.stringify(currentUser)); localStorage.setItem('superb_session_token', sessionToken); showApp(); }
+  } catch(e) { errEl.textContent = 'Connection error. Please try again.'; errEl.classList.add('visible'); }
+  btn.disabled = false; btn.textContent = 'Sign in';
+}
+
+async function signup() {
+  const username   = document.getElementById('signup-username').value.trim();
+  const password   = document.getElementById('signup-password').value;
+  const inviteCode = document.getElementById('signup-invite').value.trim();
+  const errEl      = document.getElementById('signup-error');
+  const btn        = document.getElementById('signup-btn');
+  errEl.classList.remove('visible');
+  if (!username || !password || !inviteCode) { errEl.textContent = 'All fields are required.'; errEl.classList.add('visible'); return; }
+  btn.disabled = true; btn.textContent = 'Creating account...';
+  try {
+    const res  = await fetch('/api/auth', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ action:'signup', username, password, inviteCode }) });
+    const data = await res.json();
+    if (!data.success) { errEl.textContent = data.error || 'Signup failed.'; errEl.classList.add('visible'); }
+    else { currentUser = { username: username.toLowerCase(), displayName: data.displayName }; sessionToken = data.sessionToken; localStorage.setItem('superb_user', JSON.stringify(currentUser)); localStorage.setItem('superb_session_token', sessionToken); showApp(); }
+  } catch(e) { errEl.textContent = 'Connection error. Please try again.'; errEl.classList.add('visible'); }
+  btn.disabled = false; btn.textContent = 'Create account';
+}
+
+// ════════════════════════════════════════════════════════════
+//  API HELPERS
+// ════════════════════════════════════════════════════════════
+async function authAPI(action, payload) {
+  const res = await fetch('/api/auth', { method:'POST', headers:{'Content-Type':'application/json','x-session-token':sessionToken||''}, body:JSON.stringify({ action, ...payload }) });
+  return res.json();
+}
+async function waveAPI(action, data) {
+  const res = await fetch('/api/wave', { method:'POST', headers:{'Content-Type':'application/json','x-session-token':sessionToken||''}, body:JSON.stringify({ action, data }) });
+  return res.json();
+}
+
+// ════════════════════════════════════════════════════════════
+//  MAIN TAB SWITCHING
+// ════════════════════════════════════════════════════════════
+function switchMainTab(tab) {
+  const isInvoices = tab === 'invoices';
+  document.getElementById('panel-invoices').style.display  = isInvoices ? 'block' : 'none';
+  document.getElementById('panel-payments').style.display  = isInvoices ? 'none'  : 'block';
+  document.getElementById('main-tab-invoices').classList.toggle('active',  isInvoices);
+  document.getElementById('main-tab-payments').classList.toggle('active', !isInvoices);
+  if (!isInvoices) {
+    if (!document.getElementById('paymentDate').value) document.getElementById('paymentDate').value = new Date().toISOString().split('T')[0];
+    loadPaymentAccounts();
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+//  PROPERTY SWITCHING
+// ════════════════════════════════════════════════════════════
+function switchProperty(prop) {
+  currentProperty = prop;
+  const isCustom = prop === 'custom';
+
+  ['silverstone','pleasant','custom'].forEach(p => {
+    document.getElementById('prop-'+p).classList.toggle('active', p === prop);
+  });
+  document.getElementById('info-silverstone').style.display = prop === 'silverstone' ? 'block' : 'none';
+  document.getElementById('info-pleasant').style.display    = prop === 'pleasant'     ? 'block' : 'none';
+  document.getElementById('info-custom').style.display      = isCustom                ? 'block' : 'none';
+
+  document.getElementById('input-tabs').style.display      = isCustom ? 'none'  : 'flex';
+  document.getElementById('tab-single').style.display      = isCustom ? 'none'  : (document.getElementById('tab-single').style.display === 'none' ? 'none' : 'block');
+  document.getElementById('tab-paste').style.display       = isCustom ? 'none'  : (document.getElementById('tab-paste').style.display  === 'block' ? 'block' : 'none');
+  document.getElementById('queue-wrap').style.display      = isCustom ? 'none'  : 'block';
+  document.getElementById('createBtn').style.display       = isCustom ? 'none'  : (queue.length ? 'flex' : 'none');
+  document.getElementById('customCreateBtn').style.display = isCustom ? 'flex'  : 'none';
+
+  if (!isCustom) {
+    const isPleasant = prop === 'pleasant';
+    document.getElementById('workOrderInput').placeholder = isPleasant ? 'Address (e.g. 123 Main St, Apt 4)' : 'Work order number (e.g. 3471)';
+    document.getElementById('pasteLabel').textContent     = isPleasant ? 'Paste a column of addresses from Google Sheets' : 'Paste a column of work order numbers from Google Sheets';
+    document.getElementById('pasteInput').placeholder     = isPleasant ? '123 Main St Apt 1\n456 Oak Ave Apt 2\n...' : '3471\n3472\n3473\n...';
+  }
+
+  queue = [];
+  renderQueue();
+  setStatusHide();
+
+  if (isCustom && lineItems.length === 0) {
+    lineItems = [{ id: Date.now(), description: '', qty: 1, rate: '' }];
+    renderLineItems();
+  }
+  if (isCustom) renderLineItems();
+}
+
+// F1: Advanced toggle for Silverstone / Pleasant View
+function toggleAdvanced(prop) {
+  const panel = document.getElementById('adv-panel-' + prop);
+  const icon  = document.getElementById('adv-icon-' + prop);
+  const isOpen = panel.style.display !== 'none';
+  panel.style.display = isOpen ? 'none' : 'block';
+  icon.classList.toggle('open', !isOpen);
+}
+
+function selectRate(rate) {
+  selectedRate = rate;
+  document.getElementById('rate-135').classList.toggle('active', rate === 135);
+  document.getElementById('rate-170').classList.toggle('active', rate === 170);
+}
+
+function getInvoiceConfig() {
+  if (currentProperty === 'silverstone') {
+    return { customerName: 'Silverstone Properties', unitPrice: 150.00, taxPercent: null };
+  } else if (currentProperty === 'pleasant') {
+    return { customerName: 'Pleasant View Gardens', unitPrice: selectedRate, taxPercent: 6.625 };
+  }
+  return null;
+}
+
+// Get advanced overrides for Silverstone/Pleasant View
+// Reads: selected product name (falls back if no explicit desc),
+//        custom description override, qty, unit price override.
+function getAdvancedOverrides(prop) {
+  const descEl  = document.getElementById(prop + '-desc');
+  const qtyEl   = document.getElementById(prop + '-qty');
+  const priceEl = document.getElementById(prop + '-price');
+  const desc    = descEl  ? descEl.value.trim()          : '';
+  const qty     = qtyEl   ? parseFloat(qtyEl.value) || 1 : 1;
+  const price   = priceEl ? parseFloat(priceEl.value)    : null;
+  // productName = the Wave product searched (used for product matching in Wave)
+  // customDescription = the label override shown on the invoice (user-editable)
+  const productName = window['_advProductName_' + prop] || null;
+  return {
+    productName: productName || null,
+    customDescription: desc || null,
+    quantity: qty,
+    unitPriceOverride: (price && price > 0) ? price : null
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  Advanced product search — Silverstone & Pleasant View advanced panels
+//  Lets VA search existing Wave products; auto-fills price field on select.
+//  Separate "Custom description" text field lets them override the name.
+// ─────────────────────────────────────────────────────────────────────────
+let _advSearchDebounce = {};
+
+function searchAdvProduct(prop, query) {
+  clearTimeout(_advSearchDebounce[prop]);
+  _advSearchDebounce[prop] = setTimeout(() => _doSearchAdvProduct(prop, query), 200);
+  if (!query) window['_advProductName_' + prop] = null;
+}
+
+async function _doSearchAdvProduct(prop, query) {
+  const inputId = prop + '-product-search';
+  const input   = document.getElementById(inputId);
+  const dd      = document.getElementById('floating-dropdown');
+  if (!input) return;
+  if (!query || query.length < 1) { dd.style.display = 'none'; ddItems = []; return; }
+  try {
+    const businessId = await getBusinessId();
+    const res        = await waveAPI('searchProducts', { businessId, query });
+    const products   = res.products || [];
+    const rect       = input.getBoundingClientRect();
+    dd.style.left    = rect.left + 'px';
+    dd.style.top     = (rect.bottom + 4) + 'px';
+    dd.style.width   = rect.width + 'px';
+    ddTarget         = inputId;
+    ddHighlight      = -1;
+
+    if (!products.length) {
+      dd.innerHTML = `<div class="dd-hint">No match found in Wave products</div>`;
+      ddItems = [];
+    } else {
+      ddItems = products;
+      dd.innerHTML = products.map((p, i) => {
+        const price = p.unitPrice ? parseFloat(p.unitPrice) : 0;
+        return `<div class="dd-item" data-idx="${i}">
+          <span>${p.name}</span>
+          ${price > 0 ? `<span class="dd-price">$${price.toFixed(2)}</span>` : ''}
+        </div>`;
+      }).join('');
+      dd.querySelectorAll('.dd-item').forEach(el => {
+        el.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          const p = products[parseInt(el.dataset.idx)];
+          selectAdvProduct(prop, p.name, p.unitPrice ? parseFloat(p.unitPrice) : 0);
+        });
+      });
+    }
+    dd.style.display = 'block';
+  } catch(e) { console.error('searchAdvProduct error:', e); }
+}
+
+function handleAdvProductKey(event, prop) {
+  const dd = document.getElementById('floating-dropdown');
+  if (dd.style.display === 'none' || !ddItems.length) return;
+  const items = dd.querySelectorAll('.dd-item');
+  if (event.key === 'ArrowDown') {
+    event.preventDefault();
+    ddHighlight = Math.min(ddHighlight + 1, items.length - 1);
+    items.forEach((el, i) => el.classList.toggle('highlighted', i === ddHighlight));
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault();
+    ddHighlight = Math.max(ddHighlight - 1, 0);
+    items.forEach((el, i) => el.classList.toggle('highlighted', i === ddHighlight));
+  } else if (event.key === 'Enter') {
+    event.preventDefault();
+    if (ddHighlight >= 0 && ddItems[ddHighlight]) {
+      const p = ddItems[ddHighlight];
+      selectAdvProduct(prop, p.name, p.unitPrice ? parseFloat(p.unitPrice) : 0);
+    }
+  } else if (event.key === 'Escape') {
+    dd.style.display = 'none'; ddItems = [];
+  }
+}
+
+// Called when a product is selected from the advanced panel dropdown.
+// Stores the product name (used as customDescription fallback),
+// auto-fills the price field if currently empty.
+function selectAdvProduct(prop, name, price) {
+  // Store product name — used by getAdvancedOverrides as customDescription fallback
+  window['_advProductName_' + prop] = name;
+
+  // Fill the product search field
+  const searchInput = document.getElementById(prop + '-product-search');
+  if (searchInput) searchInput.value = name;
+
+  // Pre-fill the custom description field with the product name so user can edit it
+  const descEl = document.getElementById(prop + '-desc');
+  if (descEl && !descEl.value.trim()) {
+    descEl.value = name;
+    setTimeout(() => { descEl.focus(); descEl.select(); }, 50);
+  }
+
+  // Auto-fill price if the field is empty
+  const priceEl = document.getElementById(prop + '-price');
+  if (priceEl && price > 0 && !priceEl.value) priceEl.value = price.toFixed(2);
+
+  // Default qty to 1 if not set
+  const qtyEl = document.getElementById(prop + '-qty');
+  if (qtyEl && !qtyEl.value) qtyEl.value = 1;
+
+  document.getElementById('floating-dropdown').style.display = 'none';
+  ddItems = [];
+}
+
+
+// ════════════════════════════════════════════════════════════
+//  INPUT TABS
+// ════════════════════════════════════════════════════════════
+function switchTab(tab) {
+  const isSingle = tab === 'single';
+  document.getElementById('tab-single').style.display = isSingle ? 'block' : 'none';
+  document.getElementById('tab-paste').style.display  = isSingle ? 'none'  : 'block';
+  document.querySelectorAll('#input-tabs .input-tab').forEach((t,i) => {
+    t.classList.toggle('active', (i===0 && isSingle)||(i===1 && !isSingle));
+  });
+}
+
+// ════════════════════════════════════════════════════════════
+//  QUEUE
+// ════════════════════════════════════════════════════════════
+function addToQueue() {
+  const input = document.getElementById('workOrderInput');
+  const val   = input.value.trim();
+  if (!val) return;
+  clearQueueUndoState();
+  if (queue.find(q => q.woNum === val)) { alert('That work order is already in the queue.'); return; }
+  queue.push({ woNum: val, status: 'pending' });
+  input.value = '';
+  renderQueue();
+}
+
+function addFromPaste() {
+  const text = document.getElementById('pasteInput').value.trim();
+  if (!text) return;
+  clearQueueUndoState();
+  const lines = text.split(/[\n\r\t,]+/).map(l => l.trim()).filter(Boolean);
+  let added = 0;
+  lines.forEach(wo => { if (!queue.find(q => q.woNum === wo)) { queue.push({ woNum: wo, status: 'pending' }); added++; } });
+  document.getElementById('pasteInput').value = '';
+  renderQueue();
+  if (added > 0) setStatus('loading', `Added ${added} item${added>1?'s':''} to queue.`);
+}
+
+function removeFromQueue(idx) { queue.splice(idx,1); renderQueue(); }
+function clearQueueUndoState() {
+  if (queueUndoData?.timeoutId) clearTimeout(queueUndoData.timeoutId);
+  queueUndoData = null;
+}
+function clearQueue() {
+  if (queueUndoData) {
+    queue = queueUndoData.items.map(i => ({ ...i }));
+    clearQueueUndoState();
+    renderQueue();
+    setStatus('success', 'Queue restored.');
+    return;
+  }
+  if (!queue.length) return;
+  queueUndoData = {
+    items: queue.map(i => ({ ...i })),
+    timeoutId: setTimeout(() => {
+      queueUndoData = null;
+      renderQueue();
+    }, CLEAR_QUEUE_UNDO_MS)
+  };
+  queue = [];
+  renderQueue();
+  setStatus('loading', 'Queue cleared. Click "Undo clear" to restore.');
+}
+
+function renderQueue() {
+  const list     = document.getElementById('queueList');
+  const countEl  = document.getElementById('queueCount');
+  const createBtn = document.getElementById('createBtn');
+  const clearBtn = document.getElementById('clearQueueBtn');
+  const queueVisible = currentProperty !== 'custom';
+  if (!queue.length) {
+    list.innerHTML='<li class="empty-state">No items added yet</li>';
+    countEl.style.display='none';
+    createBtn.style.display='none';
+    clearBtn.style.display = (queueVisible && !!queueUndoData) ? 'inline-flex' : 'none';
+    clearBtn.textContent = 'Undo clear';
+    return;
+  }
+  countEl.textContent = queue.length;
+  countEl.style.display='inline';
+  createBtn.style.display = queueVisible ? 'flex' : 'none';
+  clearBtn.style.display = queueVisible ? 'inline-flex' : 'none';
+  clearBtn.textContent = 'Clear queue';
+  const label = currentProperty === 'pleasant' ? '' : 'WO# ';
+  list.innerHTML = queue.map((item,i) => `
+    <li class="queue-item">
+      <span class="wo">${label}${item.woNum}</span>
+      <span class="badge badge-${item.status}">${item.status==='pending'?'Pending':item.status==='creating'?'Creating...':item.status==='done'?'✓ Done':'✕ Error'}</span>
+      ${item.status==='pending'?`<button class="btn-icon-only" onclick="removeFromQueue(${i})">×</button>`:''}
+    </li>`).join('');
+}
+
+// ════════════════════════════════════════════════════════════
+//  STATUS
+// ════════════════════════════════════════════════════════════
+function setStatus(type, msg) {
+  const box = document.getElementById('statusBox');
+  const icon = document.getElementById('statusIcon');
+  document.getElementById('statusMsg').textContent = msg;
+  box.className = 'status-box ' + type;
+  if (type==='success') icon.textContent='✓';
+  else if (type==='error') icon.textContent='✕';
+  else icon.innerHTML='<div class="spinner"></div>';
+}
+function setStatusHide() { document.getElementById('statusBox').className='status-box'; }
+
+// ════════════════════════════════════════════════════════════
+//  HISTORY
+// ════════════════════════════════════════════════════════════
+async function loadHistory() {
+  const data = await authAPI('getHistory');
+  invoiceHistory = data.history || [];
+  renderHistory();
+}
+
+function renderHistory() {
+  const tbody  = document.getElementById('historyList');
+  const filter = (document.getElementById('historyFilter')?.value || '').toLowerCase().trim();
+
+  let list = invoiceHistory.slice(-100).reverse();
+  if (filter) {
+    list = list.filter(inv =>
+      (inv.workOrder   || '').toLowerCase().includes(filter) ||
+      (inv.billTo      || '').toLowerCase().includes(filter) ||
+      (inv.invoiceNumber|| '').toLowerCase().includes(filter) ||
+      (inv.amount      || '').toLowerCase().includes(filter) ||
+      (inv.voided ? 'voided' : inv.paid ? 'paid' : inv.approved ? 'approved' : 'draft').includes(filter)
+    );
+  }
+
+  if (!list.length) { tbody.innerHTML='<tr><td colspan="5" class="empty-state">No invoices found</td></tr>'; return; }
+
+  tbody.innerHTML = list.map(inv => {
+    let statusBadge = '';
+    if (inv.voided)        statusBadge = `<span class="badge badge-voided">Voided</span>`;
+    else if (inv.paid)     statusBadge = `<span class="badge badge-paid">✓ Paid${inv.paidAt ? ' · '+inv.paidAt : ''}</span>`;
+    else if (inv.approved) statusBadge = `<span class="badge badge-approved">✓ Approved</span>`;
+    else                   statusBadge = `<span class="badge badge-draft">Draft</span>`;
+
+    let actions = '';
+    const pendingDelete = !!pendingDeletes[inv.invoiceNumber];
+    // Approve + Delete for unapproved drafts
+    if (!inv.approved && !inv.voided && inv.invoiceId) {
+      actions += `<button class="btn btn-success btn-sm" data-inv-num="${inv.invoiceNumber}" data-inv-id="${inv.invoiceId}" onclick="approveInvoice(this)" ${pendingDelete ? 'disabled title="Undo delete first"' : ''}>Approve</button>`;
+      actions += `<button class="btn ${pendingDelete ? 'btn-secondary' : 'btn-danger'} btn-sm" data-inv-num="${inv.invoiceNumber}" data-inv-id="${inv.invoiceId}" onclick="deleteInvoice(this)">${pendingDelete ? 'Undo delete' : 'Delete'}</button>`;
+      // F7: Edit button on drafts
+      actions += `<button class="btn btn-amber btn-sm" onclick="openEditModal(${JSON.stringify(inv).replace(/"/g,'&quot;')})">Edit</button>`;
+    }
+    // F6: Send button on approved (not voided, not paid)
+    if (inv.approved && !inv.voided && !inv.paid && inv.invoiceId) {
+      actions += `<button class="btn btn-secondary btn-sm" data-inv-num="${inv.invoiceNumber}" data-inv-id="${inv.invoiceId}" onclick="openSendModal(this)">✉ Send</button>`;
+    }
+
+    const pdfLink = inv.url
+      ? `<a class="invoice-link" href="${inv.url}" target="_blank">#${inv.invoiceNumber}</a>`
+      : `<span style="color:var(--gray-700)">#${inv.invoiceNumber}</span>`;
+
+    return `<tr class="${inv.voided?'voided':''}">
+      <td data-label="Work Order">
+        <div class="hist-wo">${inv.isAddress?'':'WO# '}${inv.workOrder}</div>
+        <div class="hist-num">${pdfLink}</div>
+        <div class="hist-meta">${inv.date}${inv.createdBy?' · '+inv.createdBy:''}</div>
+      </td>
+      <td data-label="Client" style="color:var(--gray-700);font-size:13px">${inv.billTo}</td>
+      <td data-label="Amount" class="hist-amount">${inv.amount||'$150.00'}</td>
+      <td data-label="Status">${statusBadge}</td>
+      <td data-label="Actions"><div class="hist-actions">${actions||'<span style="color:var(--gray-400);font-size:12px">—</span>'}</div></td>
+    </tr>`;
+  }).join('');
+}
+
+// ════════════════════════════════════════════════════════════
+//  BUSINESS ID CACHE
+// ════════════════════════════════════════════════════════════
+async function getBusinessId() {
+  if (cachedBusinessId) return cachedBusinessId;
+  const bizData    = await waveAPI('getBusinessId');
+  const businesses = bizData.data?.businesses?.edges || [];
+  const biz = businesses.find(b => b.node.name.toLowerCase().includes('superb cleaning')) || businesses[0];
+  if (!biz) throw new Error('Could not find Superb Cleaning Co. in Wave.');
+  cachedBusinessId = biz.node.id;
+  return cachedBusinessId;
+}
+
+// ════════════════════════════════════════════════════════════
+//  CREATE SINGLE — now passes customDescription + quantity
+// ════════════════════════════════════════════════════════════
+async function createSingle() {
+  const invoiceDate = document.getElementById('invoiceDate').value;
+  const woNum       = document.getElementById('workOrderInput').value.trim();
+  if (!woNum)       return setStatus('error', 'Please enter a work order number.');
+  if (!invoiceDate) return setStatus('error', 'Please select an invoice date.');
+
+  const config = getInvoiceConfig();
+  const adv    = getAdvancedOverrides(currentProperty);
+
+  setStatus('loading', 'Connecting to Wave...');
+  try {
+    const businessId = await getBusinessId();
+    const due = new Date(invoiceDate); due.setDate(due.getDate()+30);
+    const dueDate = due.toISOString().split('T')[0];
+
+    setStatus('loading', `Creating invoice for ${currentProperty==='pleasant'?'':' WO# '}${woNum}...`);
+
+    const result = await waveAPI('createInvoice', {
+      businessId,
+      customerName: config.customerName,
+      invoiceDate, dueDate,
+      poNumber: woNum,
+      unitPrice: adv.unitPriceOverride || config.unitPrice,
+      taxPercent: config.taxPercent,
+      productName: adv.productName,
+      customDescription: adv.customDescription,
+      quantity: adv.quantity
+    });
+
+    if (result.error) throw new Error(result.error);
+    const invoice     = result.invoice;
+    const effectivePrice = adv.unitPriceOverride || config.unitPrice;
+    const amountLabel = config.taxPercent
+      ? `$${(effectivePrice * adv.quantity).toFixed(2)} + tax`
+      : `$${(effectivePrice * adv.quantity).toFixed(2)}`;
+
+    const entry = {
+      workOrder: woNum, billTo: config.customerName, date: invoiceDate,
+      invoiceNumber: invoice.invoiceNumber, invoiceId: invoice.id,
+      url: invoice.pdfUrl || invoice.viewUrl,
+      amount: amountLabel, isAddress: currentProperty === 'pleasant',
+      createdBy: currentUser.displayName, createdAt: new Date().toISOString()
+    };
+    const histData = await authAPI('addHistory', { entry });
+    invoiceHistory = histData.history || invoiceHistory;
+    renderHistory();
+
+    setStatus('success', `Invoice #${invoice.invoiceNumber} created as draft — approve in Recent Invoices.`);
+    document.getElementById('workOrderInput').value = '';
+    if (invoice.pdfUrl || invoice.viewUrl) setTimeout(() => window.open(invoice.pdfUrl||invoice.viewUrl,'_blank'), 500);
+  } catch(e) {
+    setStatus('error', e.message || 'Something went wrong.');
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+//  CREATE ALL — passes customDescription + quantity
+// ════════════════════════════════════════════════════════════
+async function createAll() {
+  const invoiceDate = document.getElementById('invoiceDate').value;
+  const pending     = queue.filter(q => q.status === 'pending');
+  if (!pending.length) return setStatus('error', 'No work orders in queue.');
+  if (!invoiceDate)    return setStatus('error', 'Please select an invoice date.');
+
+  const config  = getInvoiceConfig();
+  const adv     = getAdvancedOverrides(currentProperty);
+  const btn     = document.getElementById('createBtn');
+  btn.disabled  = true;
+
+  const progressWrap = document.getElementById('progressWrap');
+  const progressBar  = document.getElementById('progressBar');
+  progressWrap.style.display = 'block';
+  progressBar.style.width    = '0%';
+
+  setStatus('loading', 'Connecting to Wave...');
+  let businessId;
+  try { businessId = await getBusinessId(); } catch(e) { setStatus('error', e.message); btn.disabled=false; return; }
+
+  const due = new Date(invoiceDate); due.setDate(due.getDate()+30);
+  const dueDate = due.toISOString().split('T')[0];
+  let successCount = 0, errorCount = 0;
+
+  for (let i = 0; i < queue.length; i++) {
+    const item = queue[i];
+    if (item.status !== 'pending') continue;
+    item.status = 'creating';
+    renderQueue();
+    setStatus('loading', `Creating invoice ${successCount+errorCount+1} of ${pending.length} (${item.woNum})...`);
+
+    try {
+      const result = await waveAPI('createInvoice', {
+        businessId, customerName: config.customerName,
+        invoiceDate, dueDate, poNumber: item.woNum,
+        unitPrice: adv.unitPriceOverride || config.unitPrice,
+        taxPercent: config.taxPercent,
+        productName: adv.productName,
+        customDescription: adv.customDescription, quantity: adv.quantity
+      });
+
+      if (result.error) throw new Error(result.error);
+      const invoice     = result.invoice;
+      const effectivePrice = adv.unitPriceOverride || config.unitPrice;
+      const amountLabel = config.taxPercent
+        ? `$${(effectivePrice * adv.quantity).toFixed(2)} + tax`
+        : `$${(effectivePrice * adv.quantity).toFixed(2)}`;
+
+      item.status        = 'done';
+      item.invoiceNumber = invoice.invoiceNumber;
+      item.pdfUrl        = invoice.pdfUrl || invoice.viewUrl;
+      successCount++;
+
+      const entry = {
+        workOrder: item.woNum, billTo: config.customerName, date: invoiceDate,
+        invoiceNumber: invoice.invoiceNumber, invoiceId: invoice.id,
+        url: item.pdfUrl, amount: amountLabel, isAddress: currentProperty === 'pleasant',
+        createdBy: currentUser.displayName, createdAt: new Date().toISOString()
+      };
+      const histData = await authAPI('addHistory', { entry });
+      invoiceHistory = histData.history || invoiceHistory;
+      renderHistory();
+      if (item.pdfUrl) setTimeout(() => window.open(item.pdfUrl,'_blank'), 300);
+    } catch(e) {
+      item.status = 'error'; errorCount++;
+    }
+    renderQueue();
+    progressBar.style.width = `${((successCount+errorCount)/pending.length)*100}%`;
+  }
+
+  btn.disabled = false;
+  if (errorCount === 0) {
+    setStatus('success', `✓ ${successCount} invoice${successCount>1?'s':''} created as drafts — review and approve below.`);
+    setTimeout(() => { queue = queue.filter(q => q.status !== 'done'); renderQueue(); }, 3000);
+  } else {
+    setStatus('error', `${successCount} created, ${errorCount} failed. Failed items remain in queue.`);
+    queue = queue.filter(q => q.status !== 'done'); renderQueue();
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+//  APPROVE / DELETE
+// ════════════════════════════════════════════════════════════
+async function approveInvoice(btn) {
+  const invoiceNumber = btn.dataset.invNum;
+  const invoiceId     = btn.dataset.invId;
+  if (pendingDeletes[invoiceNumber]) {
+    return alert(`Invoice #${invoiceNumber} is pending deletion. Click "Undo delete" first.`);
+  }
+  if (!confirm(`Approve invoice #${invoiceNumber}? This cannot be undone.`)) return;
+  btn.disabled = true; btn.textContent = '...';
+  try {
+    const waveRes = await waveAPI('approveInvoice', { invoiceId });
+    if (waveRes.error) throw new Error(waveRes.error);
+    await authAPI('approveHistory', { invoiceNumber });
+    await loadHistory();
+  } catch(e) { btn.disabled=false; btn.textContent='Approve'; alert('Could not approve: '+e.message); }
+}
+
+function cancelPendingDelete(invoiceNumber) {
+  const pending = pendingDeletes[invoiceNumber];
+  if (!pending) return;
+  clearTimeout(pending.timeoutId);
+  delete pendingDeletes[invoiceNumber];
+  renderHistory();
+  setStatus('success', `Delete canceled for invoice #${invoiceNumber}.`);
+}
+
+async function executeDeleteInvoice(invoiceNumber, invoiceId) {
+  const pending = pendingDeletes[invoiceNumber];
+  if (!pending) return;
+  delete pendingDeletes[invoiceNumber];
+  renderHistory();
+  try {
+    const waveRes = await waveAPI('deleteInvoice', { invoiceId });
+    if (waveRes.error) throw new Error(waveRes.error);
+    await authAPI('deleteHistory', { invoiceNumber });
+    await loadHistory();
+    setStatus('success', `Invoice #${invoiceNumber} deleted.`);
+  } catch(e) {
+    setStatus('error', `Could not delete invoice #${invoiceNumber}: ${e.message}`);
+  }
+}
+
+function deleteInvoice(btn) {
+  const invoiceNumber = btn.dataset.invNum;
+  const invoiceId     = btn.dataset.invId;
+  if (pendingDeletes[invoiceNumber]) {
+    cancelPendingDelete(invoiceNumber);
+    return;
+  }
+  if (!confirm(`Delete invoice #${invoiceNumber}? This will permanently remove it from Wave and your history.`)) return;
+  pendingDeletes[invoiceNumber] = {
+    timeoutId: setTimeout(() => executeDeleteInvoice(invoiceNumber, invoiceId), DELETE_UNDO_MS)
+  };
+  renderHistory();
+  setStatus('loading', `Invoice #${invoiceNumber} scheduled for delete. Click "Undo delete" to cancel.`);
+}
+
+// ════════════════════════════════════════════════════════════
+//  CUSTOM INVOICE — line items now have quantity
+// ════════════════════════════════════════════════════════════
+let _searchDebounce = null;
+let _searchDebounceProducts = {};
+
+// F3: Improved customer search — 200ms debounce, keyboard nav
+function searchCustomers(query, inputId) {
+  clearTimeout(_searchDebounce);
+  _searchDebounce = setTimeout(() => _doSearchCustomers(query, inputId), 200);
+}
+
+async function _doSearchCustomers(query, inputId) {
+  const input = document.getElementById(inputId);
+  if (!input) return;
+  const dd = document.getElementById('floating-dropdown');
+  if (!query || query.length < 1) { dd.style.display='none'; ddItems=[]; return; }
+  try {
+    const businessId = await getBusinessId();
+    const res        = await waveAPI('searchCustomers', { businessId, query });
+    const customers  = res.customers || [];
+    const rect       = input.getBoundingClientRect();
+    dd.style.left    = rect.left + 'px';
+    dd.style.top     = (rect.bottom + 4) + 'px';
+    dd.style.width   = rect.width + 'px';
+    ddTarget         = inputId;
+    ddHighlight      = -1;
+
+    if (!customers.length) {
+      dd.innerHTML = `<div class="dd-hint">No match — will create new customer "${query}"</div>`;
+      ddItems      = [];
+    } else {
+      ddItems = customers;
+      dd.innerHTML = customers.map((c,i) =>
+        `<div class="dd-item" data-idx="${i}"><span>${c.name}</span></div>`
+      ).join('');
+      dd.querySelectorAll('.dd-item').forEach(el => {
+        el.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          selectCustomer(customers[parseInt(el.dataset.idx)].name, inputId);
+        });
+      });
+    }
+    dd.style.display = 'block';
+  } catch(e) { console.log('searchCustomers error:', e.message); }
+}
+
+function selectCustomer(name, inputId) {
+  const input = document.getElementById(inputId);
+  if (input) input.value = name;
+  document.getElementById('floating-dropdown').style.display = 'none';
+  ddItems = [];
+}
+
+// F3/F4: Keyboard navigation in dropdown
+function handleDropdownKey(event, inputId) {
+  const dd = document.getElementById('floating-dropdown');
+  if (dd.style.display === 'none' || !ddItems.length) return;
+  const items = dd.querySelectorAll('.dd-item');
+  if (event.key === 'ArrowDown') {
+    event.preventDefault();
+    ddHighlight = Math.min(ddHighlight + 1, items.length - 1);
+    items.forEach((el,i) => el.classList.toggle('highlighted', i === ddHighlight));
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault();
+    ddHighlight = Math.max(ddHighlight - 1, 0);
+    items.forEach((el,i) => el.classList.toggle('highlighted', i === ddHighlight));
+  } else if (event.key === 'Enter') {
+    event.preventDefault();
+    if (ddHighlight >= 0 && ddItems[ddHighlight]) {
+      selectCustomer(ddItems[ddHighlight].name, inputId);
+    }
+  } else if (event.key === 'Escape') {
+    dd.style.display = 'none'; ddItems = [];
+  }
+}
+
+document.addEventListener('mousedown', (e) => {
+  const dd = document.getElementById('floating-dropdown');
+  if (dd && !e.target.closest('#floating-dropdown') && !e.target.closest('input')) {
+    dd.style.display = 'none'; ddItems = [];
+  }
+});
+
+// F2: Line items with quantity column
+function addLineItem() {
+  lineItems.push({ id: Date.now(), description: '', qty: 1, rate: '' });
+  renderLineItems();
+}
+function removeLineItem(id) { lineItems = lineItems.filter(i => i.id !== id); renderLineItems(); }
+function updateLineItem(id, field, value) { const item = lineItems.find(i => i.id===id); if (item) item[field] = value; }
+
+// F4: Improved product search — 200ms debounce, keyboard nav, shows price
+function searchProducts(itemId, query) {
+  clearTimeout(_searchDebounceProducts[itemId]);
+  _searchDebounceProducts[itemId] = setTimeout(() => _doSearchProducts(itemId, query), 200);
+}
+
+async function _doSearchProducts(itemId, query) {
+  // The search input is now line-item-search-{id}; the description input is line-item-desc-{id}
+  const input = document.getElementById('line-item-search-' + itemId);
+  const dd    = document.getElementById('floating-dropdown');
+  if (!input) return;
+  if (!query || query.length < 1) { dd.style.display='none'; ddItems=[]; return; }
+  try {
+    const businessId = await getBusinessId();
+    const res        = await waveAPI('searchProducts', { businessId, query });
+    const products   = res.products || [];
+    const rect       = input.getBoundingClientRect();
+    dd.style.left    = rect.left + 'px';
+    dd.style.top     = (rect.bottom + 4) + 'px';
+    dd.style.width   = rect.width + 'px';
+    ddTarget         = 'line-item-search-' + itemId;
+    ddHighlight      = -1;
+
+    if (!products.length) {
+      dd.innerHTML = `<div class="dd-hint">No match — will create "${query}" as new product</div>`;
+      ddItems = [];
+    } else {
+      ddItems = products;
+      dd.innerHTML = products.map((p,i) => {
+        const price = p.unitPrice ? parseFloat(p.unitPrice) : 0;
+        return `<div class="dd-item" data-idx="${i}">
+          <span>${p.name}</span>
+          ${price > 0 ? `<span class="dd-price">$${price.toFixed(2)}</span>` : ''}
+        </div>`;
+      }).join('');
+      dd.querySelectorAll('.dd-item').forEach(el => {
+        el.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          const p = products[parseInt(el.dataset.idx)];
+          selectProduct(itemId, p.name, p.unitPrice ? parseFloat(p.unitPrice) : 0);
+        });
+      });
+    }
+    dd.style.display = 'block';
+  } catch(e) { console.error('searchProducts error:', e); }
+}
+
+function selectProduct(itemId, name, price) {
+  const item = lineItems.find(i => i.id === itemId);
+  if (item) {
+    // Store the product name as the search display value (shown in search field)
+    item.productSearchDisplay = name;
+    // If description is empty, pre-fill it with the product name (user can override)
+    if (!item.description) item.description = name;
+    // Auto-fill rate if product has a price
+    if (price > 0) item.rate = price.toString();
+  }
+  document.getElementById('floating-dropdown').style.display = 'none';
+  ddItems = [];
+  renderLineItems();
+  // Focus description field so user can quickly override if needed
+  setTimeout(() => {
+    const d = document.getElementById('line-item-desc-' + itemId);
+    if (d) { d.focus(); d.select(); }
+  }, 50);
+}
+
+function renderLineItems() {
+  const container = document.getElementById('line-items-list');
+  if (!container) return;
+  if (!lineItems.length) { container.innerHTML=''; return; }
+  container.innerHTML = lineItems.map(item => `
+    <div class="line-item-card">
+      <!-- Row 1: product search -->
+      <div class="line-item-card-header">
+        <div class="line-item-product-search">
+          <div class="line-item-sub-label">Search product</div>
+          <input type="text" id="line-item-search-${item.id}"
+            placeholder="Search Wave products…"
+            value="${item.productSearchDisplay || ''}"
+            oninput="updateLineItem(${item.id},'productSearchDisplay',this.value); searchProducts(${item.id},this.value)"
+            onkeydown="handleProductKey(event,${item.id})"
+            autocomplete="off">
+        </div>
+        ${lineItems.length > 1
+          ? `<button class="btn-icon-only" onclick="removeLineItem(${item.id})" title="Remove" style="margin-top:16px">×</button>`
+          : ''}
+      </div>
+      <!-- Row 2: custom description + qty + rate -->
+      <div class="line-item-sub-label" style="margin-bottom:3px">Custom description <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--gray-500)">— leave blank to use product name</span></div>
+      <input type="text" id="line-item-desc-${item.id}"
+        placeholder="Override product name on invoice (optional)"
+        style="margin-bottom:8px"
+        oninput="updateLineItem(${item.id},'description',this.value)">
+      <div class="line-item-row">
+        <div>
+          <div class="line-item-sub-label">Qty</div>
+          <input id="line-item-qty-${item.id}" type="number" placeholder="1" min="0.1" step="0.5"
+            oninput="updateLineItem(${item.id},'qty',parseFloat(this.value)||1)">
+        </div>
+        <div>
+          <div class="line-item-sub-label">Rate</div>
+          <input id="line-item-rate-${item.id}" type="number" placeholder="$0.00" min="0" step="0.01"
+            oninput="updateLineItem(${item.id},'rate',this.value)">
+        </div>
+        <div></div>
+      </div>
+    </div>`
+  ).join('');
+  // Set values programmatically so special chars render correctly
+  lineItems.forEach(item => {
+    const s = document.getElementById('line-item-search-' + item.id);
+    const d = document.getElementById('line-item-desc-'   + item.id);
+    const q = document.getElementById('line-item-qty-'    + item.id);
+    const r = document.getElementById('line-item-rate-'   + item.id);
+    if (s) s.value = item.productSearchDisplay || '';
+    if (d) d.value = item.description || '';
+    if (q) q.value = item.qty || 1;
+    if (r) r.value = item.rate || '';
+  });
+}
+
+function handleProductKey(event, itemId) {
+  const dd = document.getElementById('floating-dropdown');
+  if (dd.style.display === 'none' || !ddItems.length) return;
+  const items = dd.querySelectorAll('.dd-item');
+  if (event.key === 'ArrowDown') { event.preventDefault(); ddHighlight = Math.min(ddHighlight+1, items.length-1); items.forEach((el,i) => el.classList.toggle('highlighted', i===ddHighlight)); }
+  else if (event.key === 'ArrowUp') { event.preventDefault(); ddHighlight = Math.max(ddHighlight-1, 0); items.forEach((el,i) => el.classList.toggle('highlighted', i===ddHighlight)); }
+  else if (event.key === 'Enter') {
+    event.preventDefault();
+    if (ddHighlight >= 0 && ddItems[ddHighlight]) {
+      const p = ddItems[ddHighlight];
+      selectProduct(itemId, p.name, p.unitPrice ? parseFloat(p.unitPrice) : 0);
+    }
+  }
+  else if (event.key === 'Escape') { dd.style.display='none'; ddItems=[]; }
+}
+
+async function createCustomInvoice() {
+  const invoiceDate  = document.getElementById('invoiceDate').value;
+  const customerName = document.getElementById('custom-customer').value.trim();
+  const poValue      = document.getElementById('custom-po-input').value.trim();
+  const taxToggle    = document.getElementById('custom-tax-toggle').checked;
+  const taxPercent   = taxToggle ? 6.625 : null;
+
+  if (!customerName)     return setStatus('error', 'Please enter a customer name.');
+  if (!lineItems.length) return setStatus('error', 'Please add at least one line item.');
+  if (!invoiceDate)      return setStatus('error', 'Please select an invoice date.');
+  for (const item of lineItems) {
+    const resolvedDesc = (item.description && item.description.trim()) ? item.description.trim() : (item.productSearchDisplay || '').trim();
+    if (!resolvedDesc) return setStatus('error', 'Each line item needs a product or description.');
+    if (!item.rate || isNaN(parseFloat(item.rate)) || parseFloat(item.rate) <= 0) return setStatus('error', 'Each line item needs a valid rate.');
+  }
+
+  setStatus('loading', 'Creating invoice...');
+  try {
+    const businessId = await getBusinessId();
+    const due = new Date(invoiceDate); due.setDate(due.getDate()+30);
+    const dueDate = due.toISOString().split('T')[0];
+
+    const result = await waveAPI('createCustomInvoice', {
+      businessId, customerName, invoiceDate, dueDate, poNumber: poValue,
+      lineItems: lineItems.map(i => ({
+        // productName = the Wave product to find/create (always the searched product name)
+        productName: (i.productSearchDisplay || '').trim() || (i.description || '').trim(),
+        // description = custom label shown on invoice (only if user overrode it)
+        description: (i.description && i.description.trim()) ? i.description.trim() : null,
+        unitPrice: parseFloat(i.rate),
+        quantity: parseFloat(i.qty) || 1
+      })),
+      taxPercent
+    });
+
+    if (result.error) throw new Error(result.error);
+    const invoice     = result.invoice;
+    const total       = lineItems.reduce((sum,i) => sum + parseFloat(i.rate) * (parseFloat(i.qty)||1), 0);
+    const amountLabel = taxPercent ? `$${total.toFixed(2)} + tax` : `$${total.toFixed(2)}`;
+
+    const entry = {
+      workOrder: poValue || lineItems[0].description, billTo: customerName, date: invoiceDate,
+      invoiceNumber: invoice.invoiceNumber, invoiceId: invoice.id,
+      url: invoice.pdfUrl || invoice.viewUrl,
+      amount: amountLabel, isAddress: false,
+      createdBy: currentUser.displayName, createdAt: new Date().toISOString()
+    };
+    const histData = await authAPI('addHistory', { entry });
+    invoiceHistory = histData.history || invoiceHistory;
+    renderHistory();
+
+    setStatus('success', `Invoice #${invoice.invoiceNumber} created as draft — review and approve below.`);
+    document.getElementById('custom-customer').value   = '';
+    document.getElementById('custom-po-input').value   = '';
+    document.getElementById('custom-tax-toggle').checked = false;
+    lineItems = [{ id: Date.now(), description: '', qty: 1, rate: '' }];
+    renderLineItems();
+  } catch(e) { setStatus('error', e.message || 'Something went wrong.'); }
+}
+
+// ════════════════════════════════════════════════════════════
+//  F6: SEND INVOICE MODAL
+// ════════════════════════════════════════════════════════════
+function openSendModal(btn) {
+  document.getElementById('send-invoice-id').value  = btn.dataset.invId;
+  document.getElementById('send-invoice-num').value = btn.dataset.invNum;
+  document.getElementById('send-to').value       = '';
+  document.getElementById('send-subject').value  = '';
+  document.getElementById('send-message').value  = '';
+  setModalStatus('send-status', '');
+  document.getElementById('modal-send').classList.add('open');
+}
+
+async function submitSendInvoice() {
+  const invoiceId = document.getElementById('send-invoice-id').value;
+  const invNum    = document.getElementById('send-invoice-num').value;
+  const to        = document.getElementById('send-to').value.trim();
+  const subject   = document.getElementById('send-subject').value.trim();
+  const message   = document.getElementById('send-message').value.trim();
+  const btn       = document.getElementById('send-submit-btn');
+
+  btn.disabled = true;
+  setModalStatus('send-status', 'loading', `Sending invoice #${invNum}...`);
+  try {
+    const businessId = await getBusinessId();
+    const result = await waveAPI('sendInvoice', {
+      invoiceId,
+      invoiceNumber: invNum,
+      businessId,
+      to: to || undefined,
+      subject: subject || undefined,
+      message: message || undefined
+    });
+    if (result.error) throw new Error(result.error);
+    setModalStatus('send-status', 'success', `Invoice #${invNum} sent successfully!`);
+    setTimeout(() => closeModal('modal-send'), 1800);
+  } catch(e) {
+    setModalStatus('send-status', 'error', e.message || 'Failed to send invoice.');
+    btn.disabled = false;
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+//  F7: EDIT DRAFT MODAL
+// ════════════════════════════════════════════════════════════
+function openEditModal(inv) {
+  document.getElementById('edit-invoice-id').value    = inv.invoiceId;
+  document.getElementById('edit-invoice-num').value   = inv.invoiceNumber;
+  document.getElementById('edit-customer-name').value = inv.billTo;
+  document.getElementById('edit-tax-percent').value   = inv.taxPercent || '';
+  document.getElementById('edit-invoice-date').value  = inv.date || '';
+  document.getElementById('edit-po').value            = inv.workOrder || '';
+
+  // Seed edit line items from what we know about the invoice
+  editLineItems = [{ id: Date.now(), description: inv.description || inv.workOrder || '', qty: 1, rate: inv.unitPrice || '' }];
+  renderEditLineItems();
+  setModalStatus('edit-status', '');
+  document.getElementById('modal-edit').classList.add('open');
+}
+
+function addEditLineItem() {
+  editLineItems.push({ id: Date.now(), description: '', qty: 1, rate: '' });
+  renderEditLineItems();
+}
+function removeEditLineItem(id) { editLineItems = editLineItems.filter(i => i.id !== id); renderEditLineItems(); }
+function updateEditLineItem(id, field, value) { const item = editLineItems.find(i => i.id===id); if (item) item[field]=value; }
+
+function renderEditLineItems() {
+  const container = document.getElementById('edit-line-items-list');
+  if (!container) return;
+  container.innerHTML = editLineItems.map(item => `
+    <div class="line-item-row">
+      <input type="text" id="edit-li-desc-${item.id}" placeholder="Description" value="${item.description||''}"
+        oninput="updateEditLineItem(${item.id},'description',this.value)">
+      <input type="number" id="edit-li-qty-${item.id}" placeholder="1" value="${item.qty||1}" min="0.1" step="0.5"
+        oninput="updateEditLineItem(${item.id},'qty',parseFloat(this.value)||1)">
+      <input type="number" id="edit-li-rate-${item.id}" placeholder="$0.00" value="${item.rate||''}" min="0" step="0.01"
+        oninput="updateEditLineItem(${item.id},'rate',this.value)">
+      ${editLineItems.length > 1
+        ? `<button class="btn-icon-only" onclick="removeEditLineItem(${item.id})">×</button>`
+        : '<div></div>'}
+    </div>`).join('');
+}
+
+async function submitEditInvoice() {
+  const invoiceId    = document.getElementById('edit-invoice-id').value;
+  const invoiceNum   = document.getElementById('edit-invoice-num').value;
+  const customerName = document.getElementById('edit-customer-name').value;
+  const taxPercent   = parseFloat(document.getElementById('edit-tax-percent').value) || null;
+  const invoiceDate  = document.getElementById('edit-invoice-date').value;
+  const po           = document.getElementById('edit-po').value.trim();
+  const btn          = document.getElementById('edit-submit-btn');
+
+  // Validate
+  for (const item of editLineItems) {
+    if (!item.description.trim()) return setModalStatus('edit-status', 'error', 'Each item needs a description.');
+    if (!item.rate || isNaN(parseFloat(item.rate)) || parseFloat(item.rate) <= 0) return setModalStatus('edit-status', 'error', 'Each item needs a valid rate.');
+  }
+  if (!confirm(`Delete draft #${invoiceNum} and recreate with your changes?`)) return;
+
+  btn.disabled = true;
+  setModalStatus('edit-status', 'loading', 'Deleting draft and recreating...');
+
+  try {
+    // Step 1: Delete existing draft
+    const delResult = await waveAPI('deleteInvoice', { invoiceId });
+    if (delResult.error) throw new Error('Delete failed: ' + delResult.error);
+
+    // Step 2: Remove from history
+    await authAPI('deleteHistory', { invoiceNumber: invoiceNum });
+
+    // Step 3: Recreate with new data
+    const businessId = await getBusinessId();
+    const due = new Date(invoiceDate); due.setDate(due.getDate()+30);
+    const dueDate = due.toISOString().split('T')[0];
+
+    const result = await waveAPI('createCustomInvoice', {
+      businessId, customerName, invoiceDate, dueDate, poNumber: po,
+      lineItems: editLineItems.map(i => ({ description: i.description.trim(), unitPrice: parseFloat(i.rate), quantity: parseFloat(i.qty)||1 })),
+      taxPercent
+    });
+
+    if (result.error) throw new Error(result.error);
+    const invoice     = result.invoice;
+    const total       = editLineItems.reduce((sum,i) => sum + parseFloat(i.rate) * (parseFloat(i.qty)||1), 0);
+    const amountLabel = taxPercent ? `$${total.toFixed(2)} + tax` : `$${total.toFixed(2)}`;
+
+    const entry = {
+      workOrder: po || editLineItems[0].description, billTo: customerName, date: invoiceDate,
+      invoiceNumber: invoice.invoiceNumber, invoiceId: invoice.id,
+      url: invoice.pdfUrl || invoice.viewUrl,
+      amount: amountLabel, isAddress: false,
+      createdBy: currentUser.displayName, createdAt: new Date().toISOString()
+    };
+    await authAPI('addHistory', { entry });
+    await loadHistory();
+
+    setModalStatus('edit-status', 'success', `Invoice recreated as #${invoice.invoiceNumber}!`);
+    setTimeout(() => closeModal('modal-edit'), 1800);
+  } catch(e) {
+    setModalStatus('edit-status', 'error', e.message || 'Something went wrong.');
+    btn.disabled = false;
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+//  F5: SYNC FROM WAVE MODAL
+// ════════════════════════════════════════════════════════════
+async function openSyncModal() {
+  document.getElementById('modal-sync').classList.add('open');
+  const tbody = document.getElementById('sync-table-body');
+  tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Loading from Wave…</td></tr>';
+  setModalStatus('sync-status', 'loading', 'Fetching invoices from Wave...');
+
+  try {
+    const businessId = await getBusinessId();
+    const result     = await waveAPI('getInvoices', { businessId });
+    if (result.error) throw new Error(result.error);
+
+    const waveInvoices = result.invoices || [];
+    setModalStatus('sync-status', '');
+
+    if (!waveInvoices.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No invoices found in Wave.</td></tr>';
+      return;
+    }
+
+    const histNumbers = new Set(invoiceHistory.map(h => h.invoiceNumber));
+
+    tbody.innerHTML = waveInvoices
+      .sort((a,b) => b.invoiceNumber.localeCompare(a.invoiceNumber))
+      .map(inv => {
+        const already = histNumbers.has(inv.invoiceNumber);
+        const status  = inv.status ? inv.status.toLowerCase() : 'unknown';
+        const amount  = inv.total ? `${inv.total.currency?.symbol||'$'}${parseFloat(inv.total.value).toFixed(2)}` : '—';
+        return `<tr class="${already?'already-in':''}">
+          <td><strong>#${inv.invoiceNumber}</strong></td>
+          <td style="font-size:12px">${inv.customer?.name||'—'}</td>
+          <td style="font-size:12px">${inv.invoiceDate||'—'}</td>
+          <td style="font-size:12px">${amount}</td>
+          <td><span class="badge badge-${status==='paid'?'paid':status==='approved'?'approved':status==='draft'?'draft':'voided'}">${status}</span></td>
+          <td>
+            ${already
+              ? '<span style="font-size:11px;color:var(--gray-400)">In history</span>'
+              : `<button class="btn btn-primary btn-sm" onclick="importWaveInvoice(this)" 
+                  data-inv='${JSON.stringify({
+                    invoiceNumber: inv.invoiceNumber,
+                    invoiceId: inv.id,
+                    billTo: inv.customer?.name||'',
+                    date: inv.invoiceDate||'',
+                    amount: amount,
+                    url: inv.pdfUrl||inv.viewUrl||'',
+                    status: status
+                  }).replace(/'/g,"&#39;")}'>Import</button>`
+            }
+          </td>
+        </tr>`;
+      }).join('');
+  } catch(e) {
+    setModalStatus('sync-status', 'error', e.message || 'Failed to load invoices from Wave.');
+    tbody.innerHTML = '';
+  }
+}
+
+async function importWaveInvoice(btn) {
+  const inv = JSON.parse(btn.dataset.inv.replace(/&#39;/g,"'"));
+  btn.disabled = true; btn.textContent = '…';
+
+  const entry = {
+    workOrder: inv.invoiceNumber, billTo: inv.billTo, date: inv.date,
+    invoiceNumber: inv.invoiceNumber, invoiceId: inv.invoiceId,
+    url: inv.url, amount: inv.amount, isAddress: false,
+    createdBy: 'Wave Sync', createdAt: new Date().toISOString(),
+    approved: ['approved','paid'].includes(inv.status),
+    paid: inv.status === 'paid',
+    voided: inv.status === 'voided'
+  };
+
+  try {
+    const histData = await authAPI('addHistory', { entry });
+    invoiceHistory = histData.history || invoiceHistory;
+    renderHistory();
+    btn.textContent = '✓';
+    btn.classList.remove('btn-primary');
+    btn.classList.add('btn-success');
+    btn.closest('tr').classList.add('already-in');
+  } catch(e) {
+    btn.textContent = 'Error'; btn.disabled = false;
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+//  MODAL HELPERS
+// ════════════════════════════════════════════════════════════
+function closeModal(id) {
+  document.getElementById(id).classList.remove('open');
+}
+function setModalStatus(elId, type, msg) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  el.className = 'modal-status' + (type ? ' '+type : '');
+  el.textContent = msg || '';
+}
+// Close modals on backdrop click
+document.querySelectorAll('.modal-backdrop').forEach(backdrop => {
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeModal(backdrop.id); });
+});
+
+// ════════════════════════════════════════════════════════════
+//  PAYMENTS
+// ════════════════════════════════════════════════════════════
+async function loadPaymentAccounts() {
+  const select = document.getElementById('paymentAccountId');
+  try {
+    const businessId = await getBusinessId();
+    const res        = await waveAPI('getPaymentAccounts', { businessId });
+    const accounts   = res.accounts || [];
+    if (res.error) throw new Error(res.error);
+    select.innerHTML = accounts.length
+      ? accounts.map(a => `<option value="${a.id}">${a.name}</option>`).join('')
+      : '<option value="">No bank accounts found</option>';
+  } catch(e) {
+    select.innerHTML = `<option value="">Could not load accounts — ${e.message}</option>`;
+  }
+}
+
+async function markSinglePaid() {
+  const input         = document.getElementById('singlePaidInput');
+  const invoiceNum    = input.value.trim().replace(/^#/,'');
+  const paymentDate   = document.getElementById('paymentDate').value;
+  const accountId     = document.getElementById('paymentAccountId').value;
+  const paymentMethod = document.getElementById('paymentMethod').value;
+
+  if (!invoiceNum)  return setPaidStatus('error', 'Please enter an invoice number.');
+  if (!paymentDate) return setPaidStatus('error', 'Please select a payment date.');
+  if (!accountId)   return setPaidStatus('error', 'Please select a deposit account.');
+
+  setPaidStatus('loading', `Marking invoice #${invoiceNum} as paid...`);
+  try {
+    const businessId = await getBusinessId();
+    const result = await waveAPI('markInvoicePaid', { businessId, invoiceNumber: invoiceNum, paymentDate, accountId, paymentMethod });
+    if (result.error) throw new Error(result.error);
+    if (result.alreadyPaid) { setPaidStatus('success', `Invoice #${invoiceNum} is already marked as paid in Wave.`); input.value=''; return; }
+    const histEntry = invoiceHistory.find(h => h.invoiceNumber === invoiceNum);
+    if (histEntry) { await authAPI('markPaidHistory', { invoiceNumber: invoiceNum, paymentDate }); const histData = await authAPI('getHistory'); invoiceHistory = histData.history||invoiceHistory; renderHistory(); }
+    setPaidStatus('success', `Invoice #${invoiceNum} marked as paid!`);
+    input.value = '';
+  } catch(e) { setPaidStatus('error', e.message||'Something went wrong.'); }
+}
+
+function switchPaidTab(tab) {
+  const isPaste = tab === 'paste';
+  document.getElementById('paid-tab-paste').style.display = isPaste ? 'block' : 'none';
+  document.getElementById('paid-tab-csv').style.display   = isPaste ? 'none'  : 'block';
+  document.getElementById('paid-tab-btn-paste').classList.toggle('active',  isPaste);
+  document.getElementById('paid-tab-btn-csv').classList.toggle('active',   !isPaste);
+}
+
+function addPaidItems() {
+  const pasteInput = document.getElementById('paidPasteInput');
+  const csvInput   = document.getElementById('paidCsvInput');
+  const pasteText  = pasteInput.value.trim();
+  let numbers = [];
+  if (pasteText) numbers = pasteText.split(/[\n\r,]+/).map(l => l.trim().replace(/^#/,'')).filter(Boolean);
+  if (csvInput.files && csvInput.files[0]) {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const lines      = e.target.result.split(/[\n\r]+/);
+      const csvNumbers = lines.map(l => l.split(',')[0].trim().replace(/^#/,'').replace(/"/g,'')).filter(Boolean).filter(n => !isNaN(n)||n.match(/^\d/));
+      addToPaidQueue(csvNumbers);
+    };
+    reader.readAsText(csvInput.files[0]);
+    return;
+  }
+  if (numbers.length) addToPaidQueue(numbers);
+}
+
+function addToPaidQueue(numbers) {
+  let added = 0;
+  numbers.forEach(n => { if (!paidQueue.find(q => q.invoiceNum === n)) { paidQueue.push({ invoiceNum: n, status: 'pending' }); added++; } });
+  document.getElementById('paidPasteInput').value = '';
+  renderPaidQueue();
+  if (added > 0) setPaidStatus('loading', `Added ${added} invoice${added>1?'s':''} to queue.`);
+}
+
+function renderPaidQueue() {
+  const list = document.getElementById('paidQueueList');
+  if (!paidQueue.length) { list.innerHTML='<li class="empty-state">No invoices added yet</li>'; return; }
+  list.innerHTML = paidQueue.map((item,i) => `
+    <li class="queue-item">
+      <span class="wo">#${item.invoiceNum}</span>
+      <span class="badge badge-${item.status==='done'?'paid':item.status==='error'?'error':item.status==='creating'?'creating':'pending'}">${
+        item.status==='pending'?'Pending':item.status==='creating'?'Processing...':item.status==='done'?'✓ Paid':item.error||'✕ Error'
+      }</span>
+      ${item.status==='pending'?`<button class="btn-icon-only" onclick="removePaidItem(${i})">×</button>`:''}
+    </li>`).join('');
+}
+
+function removePaidItem(idx) { paidQueue.splice(idx,1); renderPaidQueue(); }
+
+function setPaidStatus(type, msg) {
+  const box  = document.getElementById('paidStatusBox');
+  const icon = document.getElementById('paidStatusIcon');
+  document.getElementById('paidStatusMsg').textContent = msg;
+  box.className = 'status-box ' + type;
+  if (type==='success') icon.textContent='✓';
+  else if (type==='error') icon.textContent='✕';
+  else icon.innerHTML='<div class="spinner"></div>';
+}
+
+async function markAllPaid() {
+  const paymentDate   = document.getElementById('paymentDate').value;
+  const accountId     = document.getElementById('paymentAccountId').value;
+  const paymentMethod = document.getElementById('paymentMethod').value;
+  const pending       = paidQueue.filter(q => q.status === 'pending');
+  if (!pending.length) return setPaidStatus('error', 'No invoices in queue.');
+  if (!paymentDate)    return setPaidStatus('error', 'Please select a payment date.');
+  if (!accountId)      return setPaidStatus('error', 'Please select a deposit account.');
+
+  const btn = document.getElementById('markPaidBtn');
+  btn.disabled = true;
+  let successCount = 0, errorCount = 0;
+
+  try {
+    const businessId = await getBusinessId();
+    for (let i = 0; i < paidQueue.length; i++) {
+      const item = paidQueue[i];
+      if (item.status !== 'pending') continue;
+      item.status = 'creating'; renderPaidQueue();
+      setPaidStatus('loading', `Processing invoice #${item.invoiceNum}...`);
+      try {
+        const result = await waveAPI('markInvoicePaid', { businessId, invoiceNumber: item.invoiceNum, paymentDate, accountId, paymentMethod });
+        if (result.error) throw new Error(result.error);
+        if (result.alreadyPaid) { item.error='Already paid'; item.status='error'; errorCount++; continue; }
+        item.status = 'done'; successCount++;
+        const histEntry = invoiceHistory.find(h => h.invoiceNumber === item.invoiceNum);
+        if (histEntry) { await authAPI('markPaidHistory', { invoiceNumber: item.invoiceNum, paymentDate }); invoiceHistory = (await authAPI('getHistory')).history||invoiceHistory; renderHistory(); }
+      } catch(e) { item.status='error'; item.error=e.message.substring(0,50); errorCount++; }
+      renderPaidQueue();
+    }
+  } catch(e) { setPaidStatus('error', e.message); btn.disabled=false; return; }
+
+  btn.disabled = false;
+  if (errorCount === 0) {
+    setPaidStatus('success', `✓ ${successCount} invoice${successCount>1?'s':''} marked as paid!`);
+    setTimeout(() => { paidQueue = paidQueue.filter(q => q.status!=='done'); renderPaidQueue(); }, 3000);
+  } else {
+    setPaidStatus('error', `${successCount} marked paid, ${errorCount} failed. Failed ones remain in queue.`);
+    paidQueue = paidQueue.filter(q => q.status!=='done'); renderPaidQueue();
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+//  BOOT
+// ════════════════════════════════════════════════════════════
+checkSession();
+</script>
+</body>
+</html>
